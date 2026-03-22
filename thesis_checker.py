@@ -1,4 +1,5 @@
 
+"""
 用法: py thesis_checker.py <论文.docx>
 输出: 格式审查报告.html
 """
