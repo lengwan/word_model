@@ -1,5 +1,7 @@
-
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
+硕士毕业论文格式审查工具
 用法: py thesis_checker.py <论文.docx>
 输出: 格式审查报告.html
 """
@@ -1643,10 +1645,12 @@ class ThesisChecker:
         return sum(s[1] for s in self.scores.values())
 
     def get_report_data(self):
-        """返回结构化报告数据（供 Web 应用调用）"""
-        total = self.get_total_score()
-        max_total = self.get_max_score()
-        pct = (total / max_total * 100) if max_total > 0 else 0
+        """返回结构化报告数据（供 Web 应用调用），总分归一化为100分"""
+        raw_total = self.get_total_score()
+        raw_max = self.get_max_score()
+        # 归一化到100分
+        pct = (raw_total / raw_max * 100) if raw_max > 0 else 0
+        score_100 = round(pct, 0)
 
         if pct >= 90: grade = 'A'
         elif pct >= 80: grade = 'B'
@@ -1660,12 +1664,16 @@ class ThesisChecker:
         modules = []
         for m in modules_order:
             earned, weight = self.scores.get(m, (0, 0))
+            mod_pct = (earned / weight * 100) if weight > 0 else 0
+            # 每个模块也归一化为该模块满分对应的100分比例
+            norm_weight = round(weight / raw_max * 100, 1) if raw_max > 0 else 0
+            norm_earned = round(earned / raw_max * 100, 1) if raw_max > 0 else 0
             issues_m = [i for i in self.issues if i.module == m]
             modules.append({
                 'name': m,
-                'earned': earned,
-                'weight': weight,
-                'pct': (earned / weight * 100) if weight > 0 else 0,
+                'earned': norm_earned,
+                'weight': norm_weight,
+                'pct': round(mod_pct, 1),
                 'errors': sum(1 for i in issues_m if i.severity == 'error'),
                 'warnings': sum(1 for i in issues_m if i.severity == 'warning'),
                 'infos': sum(1 for i in issues_m if i.severity == 'info'),
@@ -1692,8 +1700,8 @@ class ThesisChecker:
             'total_paras': self.total_paras,
             'total_tables': len(self.doc.tables),
             'total_images': len(self.doc.inline_shapes),
-            'total_score': round(total, 1),
-            'max_score': max_total,
+            'total_score': score_100,
+            'max_score': 100,
             'pct': round(pct, 1),
             'grade': grade,
             'error_count': sum(1 for i in self.issues if i.severity == 'error'),
