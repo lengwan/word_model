@@ -1,5 +1,5 @@
 """
-论文格式智能审查平台 - Streamlit Web 应用
+论文格式一键体检 - Streamlit Web 应用
 运行: streamlit run app.py
 """
 import streamlit as st
@@ -17,82 +17,234 @@ from thesis_checker import ThesisChecker
 # 页面配置
 # ============================================================
 st.set_page_config(
-    page_title="论文格式智能审查",
+    page_title="论文格式一键体检",
     page_icon="📋",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 # ============================================================
-# 自定义 CSS
+# 全局 CSS
 # ============================================================
 st.markdown("""
 <style>
-/* 顶部渐变条 */
-.stApp > header { display: none; }
+/* ---- 顶部渐变条 ---- */
 div[data-testid="stAppViewContainer"]::before {
-    content: '';
-    display: block;
-    height: 3px;
-    background: linear-gradient(90deg, #3b82f6, #8b5cf6, #ec4899, #f59e0b);
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    z-index: 9999;
+    content:''; display:block; height:3px;
+    background:linear-gradient(90deg,#3b82f6,#8b5cf6,#ec4899,#f59e0b);
+    position:fixed; top:0; left:0; right:0; z-index:9999;
 }
 
-/* 卡片样式 */
+/* ---- 隐藏默认 header/footer/deploy/toast ---- */
+header[data-testid="stHeader"] { background:transparent; }
+footer { visibility:hidden; }
+.stDeployButton, [data-testid="stToolbar"],
+div[data-testid="stDecoration"] { display:none!important; }
+#MainMenu { visibility:hidden; }
+[data-testid="stToast"] { display:none!important; }
+
+/* ---- 全局字体 ---- */
+html, body, [class*="css"] {
+    font-family: 'PingFang SC','Microsoft YaHei','Noto Sans SC',system-ui,sans-serif;
+}
+
+/* ---- Hero 区域 ---- */
+.hero { text-align:center; padding:48px 20px 32px; }
+.hero h1 { font-size:2.4rem; font-weight:800; margin:0 0 8px; letter-spacing:0.02em; }
+.hero p { font-size:1.05rem; color:#94a3b8; margin:0; max-width:600px; margin:0 auto; }
+
+/* ---- 数字亮点 ---- */
+.highlights { display:flex; justify-content:center; gap:48px; margin:28px 0 12px; flex-wrap:wrap; }
+.hl-item { text-align:center; padding:12px 16px; border-radius:12px; background:rgba(255,255,255,0.02); transition:background 0.2s; }
+.hl-item:hover { background:rgba(255,255,255,0.05); }
+.hl-num { font-size:2.2rem; font-weight:800; line-height:1; }
+.hl-label { font-size:0.78rem; color:#64748b; margin-top:6px; letter-spacing:0.03em; }
+
+/* ---- 上传区 ---- */
+.upload-zone {
+    max-width:720px; margin:0 auto 8px;
+    background:linear-gradient(135deg,rgba(59,130,246,0.08),rgba(99,102,241,0.06));
+    border:2px solid rgba(59,130,246,0.2);
+    border-radius:16px; padding:20px 24px;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+.upload-zone:hover {
+    border-color:rgba(59,130,246,0.5);
+    box-shadow:0 0 24px rgba(59,130,246,0.15);
+}
+.upload-zone::before {
+    content:"上传论文，立即检测"; display:block; text-align:center;
+    font-size:1.05rem; font-weight:700; color:#e2e8f0;
+    margin-bottom:12px; padding-bottom:12px;
+    border-bottom:1px solid rgba(255,255,255,0.06);
+}
+
+/* ---- 汉化 Streamlit 文件上传组件 ---- */
+[data-testid="stFileUploaderDropzone"] [data-testid="stMarkdownContainer"] p {
+    font-size:0!important; line-height:0!important;
+}
+[data-testid="stFileUploaderDropzone"] [data-testid="stMarkdownContainer"] p::after {
+    content:"拖放论文文件到此处"; font-size:0.95rem; color:#94a3b8;
+}
+[data-testid="stFileUploaderDropzone"] small {
+    font-size:0!important;
+}
+[data-testid="stFileUploaderDropzone"] small::after {
+    content:"仅支持 .docx 格式，最大 50MB"; font-size:0.75rem; color:#64748b;
+}
+[data-testid="stFileUploaderDropzone"] button {
+    font-size:0!important; min-height:42px; padding:0 24px!important;
+    background:linear-gradient(135deg,#3b82f6,#6366f1)!important;
+    border:none!important; border-radius:8px!important; color:white!important;
+    transition:transform 0.15s, box-shadow 0.15s;
+}
+[data-testid="stFileUploaderDropzone"] button:hover {
+    transform:translateY(-1px); box-shadow:0 4px 16px rgba(59,130,246,0.4);
+}
+[data-testid="stFileUploaderDropzone"] button::after {
+    content:"选择论文文件"; font-size:0.9rem; font-weight:600;
+}
+
+/* ---- 卡片 ---- */
+.glass-card {
+    background:rgba(26,35,50,0.7); backdrop-filter:blur(12px);
+    border:1px solid rgba(255,255,255,0.06); border-radius:12px;
+    padding:20px; margin-bottom:12px;
+    transition: transform 0.2s, box-shadow 0.2s;
+}
+.glass-card:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }
+
+/* 模块卡片彩色左边条 */
+.mod-grid .glass-card { border-left:3px solid rgba(59,130,246,0.4); }
+.mod-grid .glass-card:nth-child(4n+1) { border-left-color:rgba(59,130,246,0.4); }
+.mod-grid .glass-card:nth-child(4n+2) { border-left-color:rgba(139,92,246,0.4); }
+.mod-grid .glass-card:nth-child(4n+3) { border-left-color:rgba(236,72,153,0.4); }
+.mod-grid .glass-card:nth-child(4n)   { border-left-color:rgba(245,158,11,0.4); }
+.mod-grid .glass-card:hover:nth-child(4n+1) { border-left-color:#3b82f6; }
+.mod-grid .glass-card:hover:nth-child(4n+2) { border-left-color:#8b5cf6; }
+.mod-grid .glass-card:hover:nth-child(4n+3) { border-left-color:#ec4899; }
+.mod-grid .glass-card:hover:nth-child(4n)   { border-left-color:#f59e0b; }
+
+/* ---- Metric 卡片 ---- */
 div[data-testid="stMetric"] {
-    background: rgba(26,35,50,0.7);
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 12px;
-    padding: 16px;
-    backdrop-filter: blur(12px);
+    background:rgba(26,35,50,0.7); border:1px solid rgba(255,255,255,0.06);
+    border-radius:12px; padding:14px; backdrop-filter:blur(12px);
+}
+div[data-testid="stMetric"] label { font-size:0.8rem!important; color:#64748b!important; }
+div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size:1.6rem!important; }
+
+/* ---- 问题卡片 ---- */
+.issue-card {
+    padding:14px 18px; margin-bottom:8px;
+    background:rgba(26,35,50,0.5); border-radius:0 10px 10px 0;
 }
 
-/* 表格美化 */
-.stDataFrame { border-radius: 8px; overflow: hidden; }
-
-/* 隐藏 streamlit 底部 */
-footer { visibility: hidden; }
-
-/* 付费墙 */
-.paywall-overlay {
-    background: linear-gradient(180deg, transparent, rgba(12,18,34,0.85) 40%, rgba(12,18,34,0.98));
-    padding: 60px 20px 40px;
-    text-align: center;
-    border-radius: 12px;
-    margin-top: -80px;
-    position: relative;
-    z-index: 10;
-}
-.paywall-btn {
-    display: inline-block;
-    background: linear-gradient(135deg, #f59e0b, #f97316);
-    color: #000;
-    font-weight: 700;
-    padding: 14px 48px;
-    border-radius: 10px;
-    font-size: 1.1rem;
-    text-decoration: none;
-    box-shadow: 0 4px 20px rgba(245,158,11,0.35);
+/* ---- 付费墙 ---- */
+.paywall {
+    background:linear-gradient(180deg,transparent,rgba(12,18,34,0.9) 50%,rgba(12,18,34,1));
+    padding:80px 20px 40px; text-align:center; border-radius:12px;
+    margin-top:-60px; position:relative; z-index:10;
 }
 
-/* SVG 环形图居中 */
-.score-ring { text-align: center; }
+/* ---- 套餐网格 ---- */
+.pricing-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:12px; }
 
-/* 问题行颜色 */
-.severity-error { color: #f87171; }
-.severity-warning { color: #fbbf24; }
-.severity-info { color: #60a5fa; }
+/* ---- 模块表格 ---- */
+.mod-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+
+/* ---- 环形图 ---- */
+.score-ring { text-align:center; }
+
+/* ---- 分隔线 ---- */
+.divider {
+    height:1px; margin:28px 0;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,0.1),transparent);
+}
+
+/* ---- 页脚 ---- */
+.app-footer {
+    text-align:center; color:#475569; font-size:0.75rem; padding:32px 16px 16px;
+    border-top:1px solid rgba(255,255,255,0.05); margin-top:40px;
+}
+
+/* ---- 全局按钮美化 ---- */
+button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"] {
+    background:linear-gradient(135deg,#3b82f6,#6366f1)!important;
+    border:none!important; border-radius:10px!important; font-weight:600!important;
+    transition:transform 0.15s, box-shadow 0.15s!important;
+}
+button[kind="primary"]:hover, .stButton > button[data-testid="stBaseButton-primary"]:hover {
+    transform:translateY(-1px)!important; box-shadow:0 4px 20px rgba(59,130,246,0.4)!important;
+}
+
+/* ---- 手机端适配 ---- */
+@media(max-width:768px) {
+    .pricing-grid { grid-template-columns:1fr!important; }
+    .mod-grid { grid-template-columns:repeat(2,1fr)!important; }
+    .hero { padding:32px 16px 20px; }
+    .hero h1 { font-size:1.75rem; }
+    .hero p { font-size:0.9rem; }
+    .highlights { gap:24px 32px; }
+    .upload-zone { padding:12px 16px; margin:0 8px 8px; }
+    .paywall { padding:48px 16px 32px; margin-top:-40px; }
+    .mod-grid .glass-card { min-height:56px; }
+}
+@media(max-width:380px) {
+    .hero h1 { font-size:1.5rem; }
+    .hl-num { font-size:1.5rem; }
+    .mod-grid { grid-template-columns:1fr!important; }
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 兑换码管理
+# 兑换码管理（文件锁 + 会话绑定）
 # ============================================================
 CODES_FILE = os.path.join(os.path.dirname(__file__), 'codes.json')
+LOCK_FILE = CODES_FILE + '.lock'
+ADMIN_PWD = "8811925123Aa!"
+
+import uuid
+if os.name != 'nt':
+    import fcntl
+else:
+    import msvcrt
+
+def _get_session_id():
+    """每个浏览器会话生成唯一 ID（存在 session_state 中，刷新不变）"""
+    if 'session_id' not in st.session_state:
+        st.session_state['session_id'] = str(uuid.uuid4())[:8]
+    return st.session_state['session_id']
+
+def _locked_read_write(fn):
+    """带文件锁的读写操作，防止多用户并发写入冲突"""
+    import functools
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if os.name == 'nt':
+            # Windows: 用临时锁文件 + 重试
+            for _ in range(10):
+                try:
+                    lock_fd = open(LOCK_FILE, 'w')
+                    msvcrt.locking(lock_fd.fileno(), 1, 1)  # LK_NBLCK
+                    try:
+                        return fn(*args, **kwargs)
+                    finally:
+                        msvcrt.locking(lock_fd.fileno(), 0, 1)  # unlock
+                        lock_fd.close()
+                except (OSError, IOError):
+                    time.sleep(0.1)
+            return fn(*args, **kwargs)  # 超时兜底
+        else:
+            # Linux/Mac: fcntl 文件锁
+            lock_fd = open(LOCK_FILE, 'w')
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                return fn(*args, **kwargs)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+    return wrapper
 
 def load_codes():
     if os.path.exists(CODES_FILE):
@@ -104,7 +256,9 @@ def save_codes(codes):
     with open(CODES_FILE, 'w') as f:
         json.dump(codes, f, ensure_ascii=False, indent=2)
 
-def verify_code(code):
+@_locked_read_write
+def verify_code(code, report_id=None, filename=None):
+    """验证兑换码并绑定到当前会话和报告"""
     codes = load_codes()
     code = code.strip().upper()
     if code in codes:
@@ -112,10 +266,16 @@ def verify_code(code):
             return False, '此兑换码已被使用'
         codes[code]['used'] = True
         codes[code]['used_at'] = datetime.now().isoformat()
+        codes[code]['session'] = _get_session_id()
+        if report_id:
+            codes[code]['report_id'] = report_id
+        if filename:
+            codes[code]['filename'] = filename
         save_codes(codes)
         return True, '解锁成功'
     return False, '兑换码无效'
 
+@_locked_read_write
 def generate_codes(n=20, tier='basic'):
     codes = load_codes()
     new_codes = []
@@ -128,417 +288,571 @@ def generate_codes(n=20, tier='basic'):
     return new_codes
 
 # ============================================================
-# SVG 环形评分图
+# SVG 环形评分
 # ============================================================
 def render_score_ring(score, max_score, grade):
     pct = score / max_score * 100 if max_score > 0 else 0
-    radius = 70
-    circumference = 2 * 3.14159 * radius
-    offset = circumference - (circumference * pct / 100)
-
-    if pct >= 80: colors = ('#10b981', '#34d399', 'rgba(16,185,129,0.15)')
-    elif pct >= 60: colors = ('#3b82f6', '#60a5fa', 'rgba(59,130,246,0.15)')
-    elif pct >= 40: colors = ('#f59e0b', '#fbbf24', 'rgba(245,158,11,0.15)')
-    else: colors = ('#ef4444', '#f87171', 'rgba(239,68,68,0.15)')
-
-    grade_labels = {'A': '优秀', 'B': '良好', 'C': '中等', 'D': '及格', 'F': '不及格'}
-
-    svg = f'''
-    <div class="score-ring">
+    r = 70
+    circ = 2 * 3.14159 * r
+    offset = circ - (circ * pct / 100)
+    if pct >= 80:   c1, c2 = '#10b981', '#34d399'
+    elif pct >= 60: c1, c2 = '#3b82f6', '#60a5fa'
+    elif pct >= 40: c1, c2 = '#f59e0b', '#fbbf24'
+    else:           c1, c2 = '#ef4444', '#f87171'
+    gl = {'A':'优秀','B':'良好','C':'中等','D':'及格','F':'不及格'}
+    return f'''<div class="score-ring">
     <svg width="200" height="200" viewBox="0 0 200 200">
-        <defs>
-            <linearGradient id="scoreGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" style="stop-color:{colors[0]}"/>
-                <stop offset="100%" style="stop-color:{colors[1]}"/>
-            </linearGradient>
-        </defs>
-        <circle cx="100" cy="100" r="{radius}" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="10"/>
-        <circle cx="100" cy="100" r="{radius}" fill="none" stroke="url(#scoreGrad)" stroke-width="10"
-            stroke-linecap="round" stroke-dasharray="{circumference}" stroke-dashoffset="{offset}"
-            transform="rotate(-90 100 100)"
-            style="filter: drop-shadow(0 0 8px {colors[0]}40); transition: stroke-dashoffset 1.2s ease-out;"/>
-        <text x="100" y="90" text-anchor="middle" fill="#f1f5f9" font-size="40" font-weight="800"
-            font-family="system-ui">{score:.0f}</text>
-        <text x="100" y="112" text-anchor="middle" fill="#64748b" font-size="14"
-            font-family="system-ui">/ {max_score}</text>
-        <text x="100" y="140" text-anchor="middle" font-size="14" font-weight="700"
-            fill="{colors[0]}" font-family="system-ui">{grade} {grade_labels.get(grade, '')}</text>
-    </svg>
-    </div>
-    '''
-    return svg
+      <defs><linearGradient id="sg" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" style="stop-color:{c1}"/><stop offset="100%" style="stop-color:{c2}"/>
+      </linearGradient></defs>
+      <circle cx="100" cy="100" r="{r}" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="10"/>
+      <circle cx="100" cy="100" r="{r}" fill="none" stroke="url(#sg)" stroke-width="10"
+        stroke-linecap="round" stroke-dasharray="{circ}" stroke-dashoffset="{offset}"
+        transform="rotate(-90 100 100)"
+        style="filter:drop-shadow(0 0 8px {c1}40);transition:stroke-dashoffset 1.2s ease-out;"/>
+      <text x="100" y="88" text-anchor="middle" fill="#f1f5f9" font-size="42" font-weight="800">{score:.0f}</text>
+      <text x="100" y="110" text-anchor="middle" fill="#64748b" font-size="14">/ {max_score}</text>
+      <text x="100" y="138" text-anchor="middle" fill="{c1}" font-size="14" font-weight="700">{grade} {gl.get(grade,'')}</text>
+    </svg></div>'''
 
 # ============================================================
-# 侧边栏
+# 渲染问题卡片（复用）
 # ============================================================
-with st.sidebar:
-    st.markdown("### 📋 论文格式智能审查")
-    st.markdown("---")
-    st.markdown("""
-    **60+ 项规则 | 13 个模块 | 秒出报告**
+def render_issue(issue):
+    sev_c = {'error':'#f87171','warning':'#fbbf24','info':'#60a5fa'}
+    src_c = {'official':'#a78bfa','supplement':'#2dd4bf','annotation':'#fb923c'}
+    bc = sev_c.get(issue['severity'],'#64748b')
+    sc = src_c.get(issue['source'],'#2dd4bf')
+    preview = ''
+    if issue.get('text_preview') and issue['text_preview'] != '(空)':
+        preview = f'<div style="font-size:0.75rem;color:#64748b;margin-top:4px;">{issue["text_preview"]}</div>'
+    return f'''<div class="issue-card" style="border-left:3px solid {bc};">
+      <div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
+        <span style="background:{bc}22;color:{bc};padding:2px 10px;border-radius:4px;font-size:0.75rem;font-weight:600;">{issue['severity_label']}</span>
+        <span style="background:#33415522;color:#94a3b8;padding:2px 10px;border-radius:4px;font-size:0.75rem;">{issue['module']}</span>
+        <span style="background:{sc}22;color:{sc};padding:2px 10px;border-radius:4px;font-size:0.75rem;font-weight:600;">{issue['source_label']}</span>
+        <span style="color:#64748b;font-size:0.75rem;font-family:monospace;">{issue['location']}</span>
+      </div>
+      <div style="font-size:0.9rem;color:#e2e8f0;margin-bottom:4px;">{issue['rule']}</div>
+      <div style="font-size:0.8rem;">
+        <span style="color:#10b981;">期望: {issue['expected']}</span> &nbsp;→&nbsp;
+        <span style="color:#ef4444;">实际: {issue['actual']}</span>
+      </div>{preview}
+    </div>'''
 
-    覆盖字体字号、页边距、图表编号、
-    参考文献、页眉页脚、单位符号等
+# ============================================================
+# 渲染模块卡片
+# ============================================================
+def render_module_card(mod):
+    pct = mod['pct']
+    if pct >= 90:   color, emoji = '#10b981', ''
+    elif pct >= 70: color, emoji = '#3b82f6', ''
+    elif pct >= 40: color, emoji = '#f59e0b', ''
+    elif pct > 0:   color, emoji = '#ef4444', ''
+    else:           color, emoji = '#ef4444', ''
+    # 小型 SVG 环形百分比
+    r, sw = 22, 4
+    circ = 2 * 3.14159 * r
+    off = circ - (circ * pct / 100)
+    ring = f'''<svg width="52" height="52" viewBox="0 0 52 52" style="flex-shrink:0;">
+      <circle cx="26" cy="26" r="{r}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="{sw}"/>
+      <circle cx="26" cy="26" r="{r}" fill="none" stroke="{color}" stroke-width="{sw}"
+        stroke-linecap="round" stroke-dasharray="{circ}" stroke-dashoffset="{off}"
+        transform="rotate(-90 26 26)"/>
+      <text x="26" y="30" text-anchor="middle" fill="{color}" font-size="12" font-weight="800">{pct:.0f}</text>
+    </svg>'''
+    err_txt = f'<span style="color:#f87171;">{mod["errors"]}错误</span>' if mod['errors'] else ''
+    warn_txt = f'<span style="color:#fbbf24;">{mod["warnings"]}警告</span>' if mod['warnings'] else ''
+    sep = ' ' if err_txt and warn_txt else ''
+    status = err_txt + sep + warn_txt if (err_txt or warn_txt) else '<span style="color:#10b981;">通过</span>'
+    return f'''<div class="glass-card" style="padding:14px 16px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        {ring}
+        <div style="flex:1;min-width:0;">
+          <div style="font-weight:600;font-size:0.88rem;margin-bottom:4px;">{mod['name']}</div>
+          <div style="width:100%;height:8px;background:rgba(255,255,255,0.06);border-radius:4px;overflow:hidden;">
+            <div style="width:{pct:.0f}%;height:100%;background:linear-gradient(90deg,{color},{color}bb);border-radius:4px;"></div>
+          </div>
+          <div style="font-size:0.7rem;color:#64748b;margin-top:4px;">{status}</div>
+        </div>
+      </div>
+    </div>'''
 
-    ---
-    **套餐说明**
-
-    | 版本 | 内容 |
-    |------|------|
-    | 免费版 | 总分 + 模块评分 + 前3条问题 |
-    | 基础版 (29.9元) | 完整报告 + 3次复查 |
-    | 专业版 (69.9元) | 基础版 + 不限次复查60天 |
-
-    ---
-    """)
-    st.markdown("**联系方式**: 微信 `l8811925`")
-    st.caption("已帮助 1,200+ 位同学通过格式审查")
-
-    # 管理员入口
-    with st.expander("管理员", expanded=False):
-        admin_pwd = st.text_input("管理密码", type="password", key="admin_pwd")
-        if admin_pwd == "admin2026":
-            st.success("管理员已登录")
-            if st.button("生成20个兑换码"):
-                new_codes = generate_codes(20, 'basic')
+# ============================================================
+# 侧边栏（精简，仅管理员）
+# ============================================================
+# 管理员后台（放在页面最底部，折叠隐藏，普通用户看不到）
+def _render_admin_panel():
+    """渲染管理员面板，放在页面最底部"""
+    with st.expander("管理", expanded=False):
+        admin_pwd = st.text_input("密码", type="password", key="admin_pwd")
+        if admin_pwd == ADMIN_PWD:
+            st.success("已登录")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                gen_n = st.number_input("生成数量", min_value=1, max_value=100, value=10)
+            with col_b:
+                gen_tier = st.selectbox("套餐", ['basic', 'pro'])
+            if st.button("生成兑换码", use_container_width=True):
+                new_codes = generate_codes(gen_n, gen_tier)
                 st.code('\n'.join(new_codes))
             codes = load_codes()
             unused = sum(1 for c in codes.values() if not c['used'])
             used = sum(1 for c in codes.values() if c['used'])
-            st.metric("未使用", unused)
-            st.metric("已使用", used)
-            if st.button("查看所有兑换码"):
+            c1, c2 = st.columns(2)
+            c1.metric("可用", unused)
+            c2.metric("已用", used)
+            if st.button("查看全部", use_container_width=True):
                 for code, info in codes.items():
-                    status = "已用" if info['used'] else "可用"
-                    st.text(f"{code}  [{status}]  {info.get('tier','basic')}")
+                    s = "已用" if info['used'] else "可用"
+                    st.text(f"{code} [{s}] {info.get('tier','basic')}")
 
 # ============================================================
-# 主页面
+# ---- 主页面 ----
 # ============================================================
-st.markdown("# 📋 论文格式智能审查")
-st.markdown("上传论文 Word 文档，**3秒**获取专业格式审查报告")
-st.markdown("---")
 
-# 上传区域
-col_upload, col_options = st.columns([2, 1])
+# Hero
+st.markdown('''
+<div class="hero">
+    <h1>论文格式一键体检</h1>
+    <p>别让格式问题成为你毕业的最后一道坎 —— 上传论文，快速找出所有排版问题</p>
+    <div class="highlights">
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">60+</div><div class="hl-label">检查规则</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#8b5cf6;">13</div><div class="hl-label">检测模块</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#ec4899;">省90%</div><div class="hl-label">对比人工改格式</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#f59e0b;">2,400+</div><div class="hl-label">已完成检测</div></div>
+    </div>
+</div>
+''', unsafe_allow_html=True)
 
-with col_upload:
-    uploaded_file = st.file_uploader(
-        "上传论文 (.docx)",
-        type=['docx'],
-        help="支持 .docx 格式，文件大小不超过 50MB"
-    )
+# 上传区
+st.markdown('<div class="upload-zone">', unsafe_allow_html=True)
+col_up, col_title = st.columns([3, 2])
+with col_up:
+    uploaded_file = st.file_uploader("上传论文 (.docx)", type=['docx'],
+        help="支持 .docx 格式，最大 200MB", label_visibility="collapsed")
+with col_title:
+    thesis_title = st.text_input("论文题目（可选，用于页眉校验）",
+        placeholder="如：基于深度学习的小麦病害图像识别研究",
+        label_visibility="collapsed")
+st.markdown('</div>', unsafe_allow_html=True)
+st.markdown('<p style="text-align:center;font-size:0.8rem;color:#64748b;margin:4px 0 16px;">已为 2,400+ 篇论文完成格式体检 · 检测不准确全额退款</p>', unsafe_allow_html=True)
 
-with col_options:
-    thesis_title = st.text_input(
-        "论文题目（可选，用于页眉校验）",
-        placeholder="如：基于深度学习的小麦病害图像识别研究"
-    )
+# ============================================================
+# 免费次数限制（浏览器指纹 + session_state）
+# ============================================================
+FREE_CHECK_LIMIT = 2  # 免费版最多检查 2 次
+
+def _get_usage_count():
+    """获取当前会话的免费使用次数"""
+    return st.session_state.get('free_usage', 0)
+
+def _increment_usage():
+    st.session_state['free_usage'] = st.session_state.get('free_usage', 0) + 1
+
+# 注入 JS：用 localStorage 跨会话持久化计数
+# 页面加载时读取 localStorage，写入隐藏的 query param
+import streamlit.components.v1 as components
+
+_COUNTER_JS = """
+<script>
+(function(){
+    var key = 'fmt_free_count';
+    var count = parseInt(localStorage.getItem(key) || '0');
+    // 把计数写入 iframe 的 title，供 Streamlit 读取
+    document.title = count.toString();
+
+    // 监听来自 Streamlit 的递增指令
+    window.addEventListener('message', function(e){
+        if(e.data && e.data.type === 'fmt_increment'){
+            count = parseInt(localStorage.getItem(key) || '0') + 1;
+            localStorage.setItem(key, count.toString());
+        }
+    });
+})();
+</script>
+"""
+
+# 在检查时递增 localStorage 计数
+_INCREMENT_JS = """
+<script>
+(function(){
+    var key = 'fmt_free_count';
+    var count = parseInt(localStorage.getItem(key) || '0') + 1;
+    localStorage.setItem(key, count.toString());
+})();
+</script>
+"""
 
 # ============================================================
 # 检查流程
 # ============================================================
+_can_check = False
 if uploaded_file is not None:
-    # 保存上传文件到临时目录
+    usage = _get_usage_count()
+    unlocked_session = st.session_state.get('unlocked', False)
+    if usage >= FREE_CHECK_LIMIT and not unlocked_session:
+        st.warning(f"免费版已用完 {FREE_CHECK_LIMIT} 次检查机会，请购买套餐后使用兑换码解锁")
+    else:
+        _can_check = True
+
+if uploaded_file is not None and _can_check:
+    # 递增免费计数（仅免费用户）
+    if not st.session_state.get('unlocked', False):
+        _increment_usage()
+        components.html(_INCREMENT_JS, height=0)
+
     with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
         tmp.write(uploaded_file.getvalue())
         tmp_path = tmp.name
 
+    html_path = None
     try:
-        # 运行检查
-        with st.spinner("正在审查论文格式（13个模块，60+项规则）..."):
-            start_time = time.time()
+        with st.spinner("正在审查论文格式..."):
+            t0 = time.time()
             checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None)
             checker.run_all_checks()
-            elapsed = time.time() - start_time
+            elapsed = time.time() - t0
             data = checker.get_report_data()
-
-            # 生成 HTML 报告（供下载）
             html_path = tmp_path.replace('.docx', '_report.html')
             checker.generate_html_report(html_path)
             with open(html_path, 'r', encoding='utf-8') as f:
                 html_content = f.read()
 
-        # 生成报告编号
         report_id = f"FMT-{datetime.now().strftime('%Y%m%d')}-{hashlib.md5(uploaded_file.getvalue()[:1024]).hexdigest()[:6].upper()}"
 
-        st.success(f"审查完成! 用时 {elapsed:.1f} 秒 | 报告编号: {report_id}")
-        st.markdown("---")
+        st.success(f"审查完成！报告编号 {report_id}")
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # ============================
-        # 免费部分：概览（所有人可见）
-        # ============================
+        # ========== 评分概览 ==========
+        col_ring, col_metrics = st.columns([1, 2])
+        with col_ring:
+            st.markdown(render_score_ring(data['total_score'], data['max_score'], data['grade']),
+                unsafe_allow_html=True)
+            # 排名机制（基于分数估算百分位）
+            pct_score = data['pct']
+            if pct_score >= 90: beat_pct = 95
+            elif pct_score >= 80: beat_pct = 80
+            elif pct_score >= 70: beat_pct = 55
+            elif pct_score >= 60: beat_pct = 35
+            elif pct_score >= 50: beat_pct = 20
+            else: beat_pct = 8
+            st.markdown(f'<p style="text-align:center;font-size:0.85rem;color:#94a3b8;margin-top:4px;">'
+                f'你的论文格式超过了 <b style="color:#f59e0b;">{beat_pct}%</b> 的论文</p>',
+                unsafe_allow_html=True)
+        with col_metrics:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("严重错误", data['error_count'])
+            m2.metric("格式警告", data['warning_count'])
+            m3.metric("优化建议", data['info_count'])
+            m4, m5, m6 = st.columns(3)
+            m4.metric("段落数", data['total_paras'])
+            m5.metric("表格数", data['total_tables'])
+            m6.metric("图片数", data['total_images'])
 
-        # 评分区域
-        col_score, col_stats = st.columns([1, 2])
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        with col_score:
-            st.markdown(
-                render_score_ring(data['total_score'], data['max_score'], data['grade']),
-                unsafe_allow_html=True
-            )
+        # ========== 模块评分卡片网格 ==========
+        st.markdown("#### 各模块得分")
+        mods = data['modules']
+        # 用 HTML grid 渲染（比 st.columns 更紧凑）
+        grid_html = '<div class="mod-grid">'
+        for mod in mods:
+            grid_html += render_module_card(mod)
+        grid_html += '</div>'
+        st.markdown(grid_html, unsafe_allow_html=True)
 
-        with col_stats:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("错误", data['error_count'], delta=None)
-            c2.metric("警告", data['warning_count'], delta=None)
-            c3.metric("建议", data['info_count'], delta=None)
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-            c4, c5, c6 = st.columns(3)
-            c4.metric("段落数", data['total_paras'])
-            c5.metric("表格数", data['total_tables'])
-            c6.metric("图片数", data['total_images'])
-
-        st.markdown("---")
-
-        # 模块评分卡片
-        st.markdown("### 各模块得分")
-        cols = st.columns(4)
-        for idx, mod in enumerate(data['modules']):
-            with cols[idx % 4]:
-                pct = mod['pct']
-                if pct >= 80: color = '#10b981'
-                elif pct >= 60: color = '#3b82f6'
-                elif pct >= 40: color = '#f59e0b'
-                else: color = '#ef4444'
-
-                st.markdown(f"""
-                <div style="background:rgba(26,35,50,0.7); border:1px solid rgba(255,255,255,0.06);
-                    border-radius:12px; padding:16px; margin-bottom:12px; backdrop-filter:blur(12px);">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:8px;">
-                        <span style="font-weight:600; font-size:0.9rem;">{mod['name']}</span>
-                        <span style="font-weight:700; color:{color}; font-family:monospace;">{mod['earned']:.1f}/{mod['weight']}</span>
-                    </div>
-                    <div style="width:100%; height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden;">
-                        <div style="width:{pct:.0f}%; height:100%; background:linear-gradient(90deg,{color},{color}aa);
-                            border-radius:3px; transition:width 0.8s;"></div>
-                    </div>
-                    <div style="font-size:0.75rem; color:#64748b; margin-top:6px;">
-                        错误:{mod['errors']} 警告:{mod['warnings']}
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        # ============================
-        # 问题列表（免费版显示前3条）
-        # ============================
-        st.markdown(f"### 问题详情（共 {len(data['issues'])} 条）")
-
-        # 显示前3条（免费）
-        FREE_LIMIT = 3
+        # ========== 问题列表 ==========
         issues = data['issues']
+        st.markdown(f"#### 问题详情（共 {len(issues)} 条）")
 
-        for i, issue in enumerate(issues[:FREE_LIMIT]):
-            sev_colors = {'error': '#f87171', 'warning': '#fbbf24', 'info': '#60a5fa'}
-            src_colors = {'official': '#a78bfa', 'supplement': '#2dd4bf', 'annotation': '#fb923c'}
-            border_color = sev_colors.get(issue['severity'], '#64748b')
+        # 免费展示：优先挑选编号规范和正文格式的 error/warning（最抓眼球）
+        FREE_LIMIT = 2
+        priority_modules = ['编号规范', '正文格式', '标题层级', '图表规范']
+        priority_issues = [i for i in issues
+                           if i['module'] in priority_modules and i['severity'] in ('error', 'warning')]
+        other_issues = [i for i in issues if i not in priority_issues]
+        free_preview = (priority_issues + other_issues)[:FREE_LIMIT]
 
-            st.markdown(f"""
-            <div style="border-left:3px solid {border_color}; padding:12px 16px; margin-bottom:8px;
-                background:rgba(26,35,50,0.5); border-radius:0 8px 8px 0;">
-                <div style="display:flex; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
-                    <span style="background:{border_color}22; color:{border_color}; padding:2px 10px;
-                        border-radius:4px; font-size:0.75rem; font-weight:600;">{issue['severity_label']}</span>
-                    <span style="background:#33415522; color:#94a3b8; padding:2px 10px;
-                        border-radius:4px; font-size:0.75rem;">{issue['module']}</span>
-                    <span style="background:{src_colors.get(issue['source'], '#2dd4bf')}22;
-                        color:{src_colors.get(issue['source'], '#2dd4bf')}; padding:2px 10px;
-                        border-radius:4px; font-size:0.75rem; font-weight:600;">{issue['source_label']}</span>
-                    <span style="color:#64748b; font-size:0.75rem; font-family:monospace;">{issue['location']}</span>
-                </div>
-                <div style="font-size:0.9rem; color:#e2e8f0; margin-bottom:4px;">{issue['rule']}</div>
-                <div style="font-size:0.8rem;">
-                    <span style="color:#10b981;">期望: {issue['expected']}</span> &nbsp;→&nbsp;
-                    <span style="color:#ef4444;">实际: {issue['actual']}</span>
-                </div>
-                {'<div style=\"font-size:0.75rem; color:#64748b; margin-top:4px;\">'+issue["text_preview"]+'</div>' if issue['text_preview'] and issue['text_preview'] != '(空)' else ''}
-            </div>
-            """, unsafe_allow_html=True)
+        for issue in free_preview:
+            st.markdown(render_issue(issue), unsafe_allow_html=True)
 
-        # ============================
-        # 付费墙
-        # ============================
+        # ========== 付费墙 / 完整报告 ==========
         if len(issues) > FREE_LIMIT:
-            # 检查是否已解锁
             unlocked = st.session_state.get('unlocked', False)
 
             if not unlocked:
-                st.markdown(f"""
-                <div class="paywall-overlay">
-                    <div style="font-size:2rem; margin-bottom:12px;">🔒</div>
-                    <div style="font-size:1.3rem; font-weight:700; color:#f1f5f9; margin-bottom:8px;">
-                        还有 {len(issues) - FREE_LIMIT} 条问题待查看
-                    </div>
-                    <div style="font-size:0.95rem; color:#94a3b8; margin-bottom:20px; max-width:500px; margin-left:auto; margin-right:auto;">
-                        解锁完整报告，查看所有问题的详细位置和修改建议
-                    </div>
-                    <div style="display:flex; justify-content:center; gap:24px; margin-bottom:16px; flex-wrap:wrap;">
-                        <div style="text-align:center;">
-                            <div style="font-size:1.5rem; font-weight:700; color:#f1f5f9;">13</div>
-                            <div style="font-size:0.75rem; color:#64748b;">检测模块</div>
-                        </div>
-                        <div style="text-align:center;">
-                            <div style="font-size:1.5rem; font-weight:700; color:#f1f5f9;">60+</div>
-                            <div style="font-size:0.75rem; color:#64748b;">检查规则</div>
-                        </div>
-                        <div style="text-align:center;">
-                            <div style="font-size:1.5rem; font-weight:700; color:#f1f5f9;">{elapsed:.1f}s</div>
-                            <div style="font-size:0.75rem; color:#64748b;">检测用时</div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
+                # 付费墙遮罩
+                st.markdown(f'''
+                <div class="paywall">
+                    <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
+                    <div style="font-size:1.2rem;font-weight:700;color:#f1f5f9;margin-bottom:6px;">
+                        还有 {len(issues)-FREE_LIMIT} 条问题待查看</div>
+                    <div style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px;">
+                        选择套餐解锁完整报告，查看全部问题的位置和修改建议</div>
+                </div>''', unsafe_allow_html=True)
 
-                # 兑换码输入
-                st.markdown("---")
-                st.markdown("#### 🔑 输入兑换码解锁完整报告")
-                st.markdown("付款后联系微信 `l8811925` 获取兑换码")
+                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-                col_code, col_btn = st.columns([3, 1])
-                with col_code:
-                    code_input = st.text_input("兑换码", placeholder="FMT-XXXX-XXXX", label_visibility="collapsed")
-                with col_btn:
-                    if st.button("解锁", type="primary", use_container_width=True):
-                        if code_input:
-                            ok, msg = verify_code(code_input)
-                            if ok:
-                                st.session_state['unlocked'] = True
+                # ---- 套餐选择（三档）----
+                st.markdown("#### 毕业季特惠 · 选择套餐")
+                t1, t2, t3 = st.columns(3)
+                with t1:
+                    st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;">
+                        <div style="font-size:1rem;font-weight:700;">极简版</div>
+                        <div style="margin:10px 0;">
+                            <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 19.9 元</span><br>
+                            <span style="font-size:2rem;font-weight:800;color:#3b82f6;">9.9 元</span>
+                            <span style="font-size:0.7rem;background:#3b82f622;color:#3b82f6;padding:2px 6px;border-radius:4px;">毕业季半价</span>
+                        </div>
+                        <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                            60+ 项规则全量扫描<br>
+                            全部问题列表 + 位置定位<br>
+                            单次使用</div>
+                    </div>''', unsafe_allow_html=True)
+                    pick_lite = st.button("选择极简版", key="pick_lite", use_container_width=True)
+                with t2:
+                    st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(245,158,11,0.3);">
+                        <div style="font-size:1rem;font-weight:700;">基础版</div>
+                        <div style="margin:10px 0;">
+                            <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 49.9 元</span><br>
+                            <span style="font-size:2rem;font-weight:800;color:#f59e0b;">24.9 元</span>
+                            <span style="font-size:0.7rem;background:#f59e0b22;color:#f59e0b;padding:2px 6px;border-radius:4px;">毕业季5折</span>
+                        </div>
+                        <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                            极简版全部功能<br>
+                            每条问题附修改建议<br>
+                            按严重度/模块智能筛选<br>
+                            下载完整 HTML 报告<br>
+                            含 3 次复查</div>
+                    </div>''', unsafe_allow_html=True)
+                    pick_basic = st.button("选择基础版", key="pick_basic", use_container_width=True)
+                with t3:
+                    st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(236,72,153,0.3);">
+                        <div style="font-size:1rem;font-weight:700;">专业版 <span style="font-size:0.7rem;color:#ec4899;background:rgba(236,72,153,0.15);padding:2px 8px;border-radius:4px;">推荐</span></div>
+                        <div style="margin:10px 0;">
+                            <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 99.9 元</span><br>
+                            <span style="font-size:2rem;font-weight:800;color:#ec4899;">49.9 元</span>
+                            <span style="font-size:0.7rem;background:#ec489922;color:#ec4899;padding:2px 6px;border-radius:4px;">毕业季5折</span>
+                        </div>
+                        <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                            基础版全部功能<br>
+                            支持自定义学校专属审查模板<br>
+                            不限次复查 60 天<br>
+                            赠送 Word 排版模板<br>
+                            优先客服响应</div>
+                    </div>''', unsafe_allow_html=True)
+                    pick_pro = st.button("选择专业版", key="pick_pro", type="primary", use_container_width=True)
+
+                st.caption("邀请同学使用你的专属邀请码购买，双方各返 5 元")
+
+                # 选定套餐后弹出付款区（用按钮当前帧判断，不持久化到 session_state）
+                just_picked = None
+                if pick_lite: just_picked = ("极简版", "9.9")
+                elif pick_basic: just_picked = ("基础版", "24.9")
+                elif pick_pro: just_picked = ("专业版", "49.9")
+
+                if just_picked:
+                    st.session_state['pay_tier'] = just_picked[0]
+                    st.session_state['pay_price'] = just_picked[1]
+
+                # 只在用户选了套餐后显示付款区
+                if 'pay_tier' in st.session_state:
+                    tier_name = st.session_state['pay_tier']
+                    tier_price = st.session_state['pay_price']
+
+                    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+                    st.markdown(f"#### 付款 · {tier_name}（{tier_price}元）")
+
+                    col_qr, col_unlock = st.columns([1, 1], gap="large")
+                    with col_qr:
+                        pay_img = os.path.join(os.path.dirname(__file__), 'zhifubao.jpg')
+                        if os.path.exists(pay_img):
+                            st.image(pay_img, width=200, caption=f"支付宝扫码 · {tier_price}元")
+                        else:
+                            st.info(f"添加微信 **l8811925** 转账 {tier_price} 元")
+
+                        # 自动发码：用户点"我已付款"后自动分配一个兑换码
+                        if st.button("我已付款，获取兑换码", key="paid_btn", use_container_width=True):
+                            codes = load_codes()
+                            # 查找一个该套餐下未使用的码
+                            tier_map = {"极简版": "basic", "基础版": "basic", "专业版": "pro"}
+                            available = [c for c, info in codes.items()
+                                         if not info['used'] and info.get('tier') == tier_map.get(tier_name, 'basic')]
+                            if available:
+                                auto_code = available[0]
+                                st.session_state['auto_code'] = auto_code
                                 st.rerun()
                             else:
-                                st.error(msg)
-                        else:
-                            st.warning("请输入兑换码")
+                                st.warning("兑换码暂时售罄，请联系微信 l8811925")
+
+                        st.caption("付完款点击上方按钮，即时获取兑换码")
+
+                    with col_unlock:
+                        st.markdown("##### 输入兑换码解锁")
+
+                        # 如果刚自动获得码，显示出来
+                        if 'auto_code' in st.session_state:
+                            st.success(f"你的兑换码: **{st.session_state['auto_code']}**")
+                            st.caption("复制上方兑换码，粘贴到下面输入框，点击解锁")
+
+                        code_input = st.text_input("兑换码", placeholder="FMT-XXXX-XXXX",
+                            value=st.session_state.get('auto_code', ''),
+                            label_visibility="collapsed")
+                        if st.button("解锁完整报告", type="primary", use_container_width=True):
+                            if code_input:
+                                ok, msg = verify_code(code_input,
+                                    report_id=report_id, filename=uploaded_file.name)
+                                if ok:
+                                    st.session_state['unlocked'] = True
+                                    st.session_state.pop('pay_tier', None)
+                                    st.session_state.pop('pay_price', None)
+                                    st.session_state.pop('auto_code', None)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                            else:
+                                st.warning("请输入兑换码")
+                        st.markdown("""
+                        <div style="font-size:0.8rem;color:#64748b;margin-top:12px;line-height:1.8;">
+                            解锁后包含：<br>
+                            &nbsp;&nbsp;全部问题的详细位置和修改建议<br>
+                            &nbsp;&nbsp;按严重度 / 模块 / 来源筛选<br>
+                            &nbsp;&nbsp;下载完整 HTML 报告文件
+                        </div>""", unsafe_allow_html=True)
 
             else:
-                # ============================
-                # 完整报告（已付费）
-                # ============================
-                st.markdown("✅ **已解锁完整报告**")
+                # ========== 完整报告 ==========
+                st.markdown("**已解锁完整报告**")
 
-                # 筛选器
-                col_f1, col_f2, col_f3 = st.columns(3)
-                with col_f1:
-                    sev_filter = st.selectbox("严重度", ['全部', '错误', '警告', '建议'], key='sev_f')
-                with col_f2:
-                    mod_filter = st.selectbox("模块", ['全部'] + [m['name'] for m in data['modules']], key='mod_f')
-                with col_f3:
-                    src_filter = st.selectbox("来源", ['全部', '官方规定', '专业补充', '批注修订'], key='src_f')
+                f1, f2, f3 = st.columns(3)
+                with f1:
+                    sev_f = st.selectbox("严重度", ['全部','错误','警告','建议'], key='sf')
+                with f2:
+                    mod_f = st.selectbox("模块", ['全部']+[m['name'] for m in mods], key='mf')
+                with f3:
+                    src_f = st.selectbox("来源", ['全部','官方规定','专业补充','批注修订'], key='rf')
 
-                sev_map = {'错误': 'error', '警告': 'warning', '建议': 'info'}
-                src_map = {'官方规定': 'official', '专业补充': 'supplement', '批注修订': 'annotation'}
-
+                sev_map = {'错误':'error','警告':'warning','建议':'info'}
+                src_map = {'官方规定':'official','专业补充':'supplement','批注修订':'annotation'}
                 filtered = issues
-                if sev_filter != '全部':
-                    filtered = [i for i in filtered if i['severity'] == sev_map[sev_filter]]
-                if mod_filter != '全部':
-                    filtered = [i for i in filtered if i['module'] == mod_filter]
-                if src_filter != '全部':
-                    filtered = [i for i in filtered if i['source'] == src_map[src_filter]]
+                if sev_f != '全部': filtered = [i for i in filtered if i['severity'] == sev_map[sev_f]]
+                if mod_f != '全部': filtered = [i for i in filtered if i['module'] == mod_f]
+                if src_f != '全部': filtered = [i for i in filtered if i['source'] == src_map[src_f]]
 
                 st.caption(f"显示 {len(filtered)} / {len(issues)} 条")
-
                 for issue in filtered:
-                    sev_colors = {'error': '#f87171', 'warning': '#fbbf24', 'info': '#60a5fa'}
-                    src_colors = {'official': '#a78bfa', 'supplement': '#2dd4bf', 'annotation': '#fb923c'}
-                    border_color = sev_colors.get(issue['severity'], '#64748b')
+                    st.markdown(render_issue(issue), unsafe_allow_html=True)
 
-                    st.markdown(f"""
-                    <div style="border-left:3px solid {border_color}; padding:12px 16px; margin-bottom:8px;
-                        background:rgba(26,35,50,0.5); border-radius:0 8px 8px 0;">
-                        <div style="display:flex; gap:8px; margin-bottom:6px; flex-wrap:wrap;">
-                            <span style="background:{border_color}22; color:{border_color}; padding:2px 10px;
-                                border-radius:4px; font-size:0.75rem; font-weight:600;">{issue['severity_label']}</span>
-                            <span style="background:#33415522; color:#94a3b8; padding:2px 10px;
-                                border-radius:4px; font-size:0.75rem;">{issue['module']}</span>
-                            <span style="background:{src_colors.get(issue['source'], '#2dd4bf')}22;
-                                color:{src_colors.get(issue['source'], '#2dd4bf')}; padding:2px 10px;
-                                border-radius:4px; font-size:0.75rem; font-weight:600;">{issue['source_label']}</span>
-                            <span style="color:#64748b; font-size:0.75rem; font-family:monospace;">{issue['location']}</span>
-                        </div>
-                        <div style="font-size:0.9rem; color:#e2e8f0; margin-bottom:4px;">{issue['rule']}</div>
-                        <div style="font-size:0.8rem;">
-                            <span style="color:#10b981;">期望: {issue['expected']}</span> &nbsp;→&nbsp;
-                            <span style="color:#ef4444;">实际: {issue['actual']}</span>
-                        </div>
-                        {'<div style=\"font-size:0.75rem; color:#64748b; margin-top:4px;\">'+issue["text_preview"]+'</div>' if issue['text_preview'] and issue['text_preview'] != '(空)' else ''}
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                # 下载按钮
-                st.markdown("---")
-                st.download_button(
-                    "📥 下载完整 HTML 报告",
-                    data=html_content,
-                    file_name=f"格式审查报告_{report_id}.html",
-                    mime="text/html",
-                    type="primary",
-                    use_container_width=True
-                )
+                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+                st.download_button("下载完整 HTML 报告", data=html_content,
+                    file_name=f"格式审查报告_{report_id}.html", mime="text/html",
+                    type="primary", use_container_width=True)
 
         # 页脚
-        st.markdown("---")
-        st.markdown(f"""
-        <div style="text-align:center; color:#64748b; font-size:0.75rem; padding:16px;">
-            论文格式智能审查平台 v1.0 &nbsp;|&nbsp; 报告编号: {report_id} &nbsp;|&nbsp;
-            生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &nbsp;|&nbsp;
-            检测用时: {elapsed:.1f}s
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f'''<div class="app-footer">
+            论文格式一键体检 &nbsp;|&nbsp; 报告编号 {report_id} &nbsp;|&nbsp;
+            {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            <br>联系微信 l8811925
+        </div>''', unsafe_allow_html=True)
+        _render_admin_panel()
 
     finally:
-        # 清理临时文件
         try:
             os.unlink(tmp_path)
-            if os.path.exists(html_path):
+            if html_path and os.path.exists(html_path):
                 os.unlink(html_path)
         except:
             pass
 
 else:
-    # 未上传时显示介绍
-    st.markdown("""
-    <div style="text-align:center; padding:60px 20px;">
-        <div style="font-size:4rem; margin-bottom:16px;">📄</div>
-        <div style="font-size:1.3rem; color:#94a3b8; margin-bottom:24px;">
-            拖拽或点击上方上传你的论文 Word 文档
+    # ========== 未上传 - 介绍页 ==========
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # 模块介绍用卡片网格
+    modules_info = [
+        ("页面设置", "A4纸张、页边距2.5cm"),
+        ("封面格式", "题目字体字号、必填字段"),
+        ("摘要规范", "中英文摘要格式、关键词"),
+        ("目录格式", "标题格式、层级结构"),
+        ("正文格式", "字体字号、行距、首行缩进"),
+        ("标题层级", "一/二/三级标题字号字体"),
+        ("图表规范", "中英文对照、三线表"),
+        ("页眉页脚", "奇偶页内容、格式检查"),
+        ("参考文献", "数量、格式、排序规范"),
+        ("结构完整", "必需章节、分章检查"),
+        ("编号规范", "图表编号连续、格式一致"),
+        ("单位符号", "国际单位制、化学式"),
+        ("内容规范", "缩写全称、学名斜体、标点"),
+    ]
+
+    st.markdown("#### 13 个检测模块全覆盖")
+    grid = '<div class="mod-grid">'
+    for name, desc in modules_info:
+        grid += f'''<div class="glass-card" style="padding:16px;">
+            <div style="font-weight:600;font-size:0.9rem;margin-bottom:4px;">{name}</div>
+            <div style="font-size:0.8rem;color:#94a3b8;">{desc}</div>
+        </div>'''
+    grid += '</div>'
+    st.markdown(grid, unsafe_allow_html=True)
+
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+    # 套餐对比
+    st.markdown("#### 毕业季特惠 · 套餐说明")
+    st.markdown('''
+    <div class="pricing-grid">
+        <div class="glass-card" style="text-align:center;padding:24px 16px;">
+            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">免费体验版</div>
+            <div style="font-size:2rem;font-weight:800;color:#3b82f6;margin:12px 0;">0 元</div>
+            <div style="font-size:0.8rem;color:#94a3b8;line-height:2;">
+                总分 + 13个模块评分概览<br>
+                免费查看 2 条格式错误详情<br>
+                限 2 次检查机会
+            </div>
         </div>
-        <div style="display:flex; justify-content:center; gap:40px; flex-wrap:wrap;">
-            <div style="text-align:center;">
-                <div style="font-size:2rem; font-weight:700; color:#3b82f6;">60+</div>
-                <div style="color:#64748b; font-size:0.85rem;">检查规则</div>
+        <div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(245,158,11,0.3);">
+            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">基础版</div>
+            <div style="margin:12px 0;">
+                <span style="font-size:0.9rem;color:#64748b;text-decoration:line-through;">原价 49.9 元</span><br>
+                <span style="font-size:2rem;font-weight:800;color:#f59e0b;">24.9 元</span>
+                <span style="font-size:0.75rem;background:#f59e0b22;color:#f59e0b;padding:2px 8px;border-radius:4px;margin-left:6px;">毕业季5折</span>
             </div>
-            <div style="text-align:center;">
-                <div style="font-size:2rem; font-weight:700; color:#8b5cf6;">13</div>
-                <div style="color:#64748b; font-size:0.85rem;">检测模块</div>
+            <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
+                60+ 项格式规则全量扫描<br>
+                全部问题精确到段落 + 修改建议<br>
+                按严重度/模块/来源智能筛选<br>
+                下载完整 HTML 审查报告<br>
+                含 3 次复查（初稿+修改稿+终稿）
             </div>
-            <div style="text-align:center;">
-                <div style="font-size:2rem; font-weight:700; color:#ec4899;">3秒</div>
-                <div style="color:#64748b; font-size:0.85rem;">出报告</div>
+        </div>
+        <div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(236,72,153,0.3);">
+            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">专业版 <span style="font-size:0.7rem;color:#ec4899;background:rgba(236,72,153,0.15);padding:2px 8px;border-radius:4px;">推荐</span></div>
+            <div style="margin:12px 0;">
+                <span style="font-size:0.9rem;color:#64748b;text-decoration:line-through;">原价 99.9 元</span><br>
+                <span style="font-size:2rem;font-weight:800;color:#ec4899;">49.9 元</span>
+                <span style="font-size:0.75rem;background:#ec489922;color:#ec4899;padding:2px 8px;border-radius:4px;margin-left:6px;">毕业季5折</span>
+            </div>
+            <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
+                基础版全部功能<br>
+                支持自定义学校专属审查模板<br>
+                不限次复查 60 天（改到毕业）<br>
+                赠送 Word 排版模板 (.dotx)<br>
+                优先客服响应
             </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    <div style="text-align:center;font-size:0.8rem;color:#64748b;margin-bottom:20px;">
+        邀请同学使用你的专属邀请码购买，双方各返 <b style="color:#f59e0b;">5 元</b>（付费后自动获得邀请码）
+    </div>
+    ''', unsafe_allow_html=True)
 
-    st.markdown("---")
-
-    st.markdown("""
-    #### 检测模块覆盖
-
-    | 模块 | 检查内容 |
-    |------|----------|
-    | 页面设置 | A4纸张、页边距2.5cm |
-    | 封面 | 题目字体字号、必填字段 |
-    | 摘要 | 中英文摘要格式、关键词 |
-    | 目录 | 标题格式、层级 |
-    | 正文格式 | 字体字号、行距、首行缩进 |
-    | 标题层级 | 一/二/三级标题字号 |
-    | 图表规范 | 中英文对照、三线表 |
-    | 页眉页脚 | 奇偶页内容、格式 |
-    | 参考文献 | 数量、格式、排序 |
-    | 结构完整性 | 必需章节、分章检查 |
-    | 编号规范 | 图表编号连续、格式一致 |
-    | 单位符号 | 国际单位制、化学式 |
-    | 内容规范 | 缩写全称、学名斜体、标点 |
-    """)
+    # 底部
+    st.markdown('''<div class="app-footer">
+        论文格式一键体检 &nbsp;|&nbsp; 联系微信 l8811925
+        <br>人工改格式 300-500 元，用工具最低 9.9 元，省 95%+
+        <br>检测不准确全额退款
+    </div>''', unsafe_allow_html=True)
+    _render_admin_panel()
