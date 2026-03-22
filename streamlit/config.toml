@@ -1,4 +1,5 @@
 [theme]
+base = "dark"
 primaryColor = "#3b82f6"
 backgroundColor = "#0c1222"
 secondaryBackgroundColor = "#1a2332"
@@ -7,3 +8,6 @@ font = "sans serif"
 
 [server]
 maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
