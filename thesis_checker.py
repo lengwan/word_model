@@ -1,0 +1,2081 @@
+
+用法: py thesis_checker.py <论文.docx>
+输出: 格式审查报告.html
+"""
+
+import sys
+import os
+import re
+import math
+from dataclasses import dataclass, field
+from typing import Optional
+from docx import Document
+from docx.shared import Pt, Cm, Emu
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from lxml import etree
+
+# ============================================================
+# 常量定义
+# ============================================================
+
+# 字号映射 (名称 -> pt值)
+FONT_SIZE_MAP = {
+    '初号': 42, '小初': 36,
+    '一号': 26, '小一': 24,
+    '二号': 22, '小二': 18,
+    '三号': 16, '小三': 15,
+    '四号': 14, '小四': 12,
+    '五号': 10.5, '小五': 9,
+    '六号': 7.5, '小六': 6.5,
+    '七号': 5.5, '八号': 5,
+}
+
+# pt值反查字号名
+PT_TO_NAME = {v: k for k, v in FONT_SIZE_MAP.items()}
+
+# 中文字体名（python-docx 中可能出现的变体）
+SIMSUNG_NAMES = {'宋体', 'SimSun', 'simsun', '新宋体', 'NSimSun'}
+SIMHEI_NAMES = {'黑体', 'SimHei', 'simhei'}
+KAITI_NAMES = {'楷体', 'KaiTi', 'kaiti', '楷体_GB2312'}
+TNR_NAMES = {'Times New Roman', 'times new roman', 'TimesNewRomanPSMT'}
+
+# 页边距容差 (EMU)
+MARGIN_TOLERANCE = Cm(0.15)  # 允许 1.5mm 误差
+A4_WIDTH = Cm(21)
+A4_HEIGHT = Cm(29.7)
+SIZE_TOLERANCE = Cm(0.5)
+TARGET_MARGIN = Cm(2.5)
+
+# Word XML 命名空间
+W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
+
+# 论文必需章节
+REQUIRED_SECTIONS = [
+    '符号说明', '摘要', 'abstract', '目录',
+    '引言', '材料与方法', '结果与分析', '讨论', '结论',
+    '参考文献', '致谢', '攻读学位期间发表论文'
+]
+
+# ============================================================
+# 数据类
+# ============================================================
+
+@dataclass
+class Issue:
+    """单条格式问题"""
+    module: str          # 所属检查模块
+    severity: str        # error / warning / info
+    location: str        # 位置描述
+    para_index: int      # 段落序号 (-1 表示非段落)
+    text_preview: str    # 文本预览 (截取前40字)
+    rule: str            # 违反的规则描述
+    expected: str        # 期望值
+    actual: str          # 实际值
+    source: str          # 'official' 或 'supplement'
+
+    @property
+    def source_label(self):
+        return {'official': '官方规定', 'supplement': '专业补充',
+                'annotation': '批注修订'}.get(self.source, '专业补充')
+
+    @property
+    def severity_label(self):
+        return {'error': '错误', 'warning': '警告', 'info': '建议'}[self.severity]
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+def get_east_asian_font(run):
+    """获取 run 的东亚字体名（中文字体）"""
+    rPr = run._element.find(f'{{{W_NS}}}rPr')
+    if rPr is not None:
+        rFonts = rPr.find(f'{{{W_NS}}}rFonts')
+        if rFonts is not None:
+            ea = rFonts.get(f'{{{W_NS}}}eastAsia')
+            if ea:
+                return ea
+            # 有时中文字体放在 hint="eastAsia" 的 ascii 属性中
+            hint = rFonts.get(f'{{{W_NS}}}hint')
+            if hint == 'eastAsia':
+                return rFonts.get(f'{{{W_NS}}}ascii', None)
+    return None
+
+
+def get_effective_font_name(run):
+    """获取 run 的有效字体名（先查直接格式，再查样式）"""
+    # 直接格式
+    name = run.font.name
+    if name:
+        return name
+    # 样式字体
+    style = run._element.getparent()  # w:p
+    if style is not None:
+        pPr = style.find(f'{{{W_NS}}}pPr')
+        if pPr is not None:
+            pStyle = pPr.find(f'{{{W_NS}}}pStyle')
+            if pStyle is not None:
+                return None  # 从样式继承，难以准确获取
+    return None
+
+
+def get_effective_font_size(run, para):
+    """获取 run 的有效字号（pt），考虑继承"""
+    if run.font.size:
+        return run.font.size / 12700  # EMU to pt
+    # 尝试从段落样式获取
+    if para.style and para.style.font and para.style.font.size:
+        return para.style.font.size / 12700
+    return None
+
+
+def get_effective_bold(run, para):
+    """获取 run 是否加粗，考虑继承"""
+    if run.font.bold is not None:
+        return run.font.bold
+    if para.style and para.style.font:
+        return para.style.font.bold
+    return None
+
+
+def get_effective_alignment(para):
+    """获取段落有效对齐方式"""
+    if para.alignment is not None:
+        return para.alignment
+    if para.style and para.style.paragraph_format and para.style.paragraph_format.alignment is not None:
+        return para.style.paragraph_format.alignment
+    return None
+
+
+def get_effective_line_spacing(para):
+    """获取段落有效行距（倍数）"""
+    pf = para.paragraph_format
+    if pf.line_spacing is not None:
+        if isinstance(pf.line_spacing, (int, float)) and pf.line_spacing < 10:
+            return pf.line_spacing
+        elif isinstance(pf.line_spacing, int) and pf.line_spacing > 100:
+            return pf.line_spacing / 12700 / 12  # EMU -> 行距倍数近似
+    # 从样式获取
+    if para.style and para.style.paragraph_format:
+        spf = para.style.paragraph_format
+        if spf.line_spacing is not None:
+            if isinstance(spf.line_spacing, (int, float)) and spf.line_spacing < 10:
+                return spf.line_spacing
+    return None
+
+
+def get_effective_first_indent(para):
+    """获取段落首行缩进（cm）"""
+    pf = para.paragraph_format
+    if pf.first_line_indent is not None:
+        return pf.first_line_indent / 360000  # EMU to cm
+    if para.style and para.style.paragraph_format:
+        spf = para.style.paragraph_format
+        if spf.first_line_indent is not None:
+            return spf.first_line_indent / 360000
+    return None
+
+
+def pt_to_name(pt_val):
+    """将 pt 值转换为中文字号名"""
+    if pt_val is None:
+        return '未知'
+    # 允许 0.5pt 误差
+    for name, pt in FONT_SIZE_MAP.items():
+        if abs(pt_val - pt) < 0.6:
+            return f'{name}({pt}pt)'
+    return f'{pt_val}pt'
+
+
+def truncate(text, max_len=50):
+    """截取文本预览"""
+    text = text.replace('\n', ' ').strip()
+    if len(text) > max_len:
+        return text[:max_len] + '...'
+    return text if text else '(空)'
+
+
+def has_chinese(text):
+    """检测文本是否包含中文"""
+    return bool(re.search(r'[\u4e00-\u9fff]', text))
+
+
+def is_heading_paragraph(para):
+    """判断段落是否为标题（通过样式名或文本模式）"""
+    style_name = para.style.name.lower() if para.style else ''
+    if 'heading' in style_name or 'toc' in style_name:
+        return True
+    text = para.text.strip()
+    # 匹配 "1 引言", "2.1 xxx", "3.1.2 xxx" 等
+    if re.match(r'^\d+(\.\d+)*\s+\S', text):
+        return True
+    return False
+
+
+def get_heading_level(para):
+    """获取标题级别: 1=一级, 2=二级, 3=三级及以下, 0=非标题"""
+    text = para.text.strip()
+    style_name = para.style.name.lower() if para.style else ''
+
+    # 通过样式判断
+    m = re.search(r'heading\s*(\d)', style_name)
+    if m:
+        return min(int(m.group(1)), 3)
+
+    # 通过文本模式判断
+    if re.match(r'^\d+\s+\S', text) and not re.match(r'^\d+\.\d+', text):
+        return 1  # "1 引言"
+    if re.match(r'^\d+\.\d+\s+\S', text) and not re.match(r'^\d+\.\d+\.\d+', text):
+        return 2  # "2.1 xxx"
+    if re.match(r'^\d+\.\d+\.\d+', text):
+        return 3  # "3.1.2 xxx"
+    return 0
+
+
+# ============================================================
+# 主检查类
+# ============================================================
+
+class ThesisChecker:
+    def __init__(self, filepath, thesis_title=None):
+        self.filepath = filepath
+        self.filename = os.path.basename(filepath)
+        self.doc = Document(filepath)
+        self.issues: list[Issue] = []
+        self.scores = {}  # module -> (earned, total)
+        self._user_title = thesis_title  # 用户指定的论文题目（优先级最高）
+
+        # 预处理：识别文档结构
+        self._identify_sections()
+
+    def _identify_sections(self):
+        """识别文档各部分的段落范围"""
+        self.section_ranges = {}
+        paras = self.doc.paragraphs
+        n = len(paras)
+
+        # 关键词匹配各章节起始位置
+        markers = {
+            'cover': None,
+            'declaration': None,
+            'symbols': None,
+            'toc': None,
+            'abstract_cn': None,
+            'abstract_en': None,
+            'introduction': None,
+            'materials': None,
+            'results': None,
+            'discussion': None,
+            'conclusion': None,
+            'references': None,
+            'appendix': None,
+            'acknowledgement': None,
+            'publications': None,
+        }
+
+        for i, para in enumerate(paras):
+            text = para.text.strip()
+            text_lower = text.lower().replace(' ', '')
+
+            if i < 20 and markers['cover'] is None:
+                markers['cover'] = 0
+
+            if '原创' in text and '声明' in text:
+                markers['declaration'] = i
+            elif re.match(r'^符\s*号\s*说\s*明', text):
+                markers['symbols'] = i
+            elif re.match(r'^目\s*录', text) and len(text) < 10:
+                markers['toc'] = i
+            elif re.match(r'^中\s*文\s*摘\s*要', text) or text == '摘要' or re.match(r'^摘\s+要', text):
+                markers['abstract_cn'] = i
+            elif 'abstract' in text_lower and len(text) < 30 and not has_chinese(text):
+                if markers['abstract_en'] is None:
+                    markers['abstract_en'] = i
+            elif re.match(r'^1\s*(引言|前言|绪论)', text) or re.match(r'^引\s*言', text) or re.match(r'^前\s*言', text):
+                markers['introduction'] = i
+            elif re.match(r'^2\s*材料与方法', text) or re.match(r'^2\s+材料', text):
+                markers['materials'] = i
+            elif re.match(r'^3\s*结果与分析', text) or re.match(r'^3\s+结果', text):
+                markers['results'] = i
+            elif re.match(r'^4\s*讨\s*论', text) or re.match(r'^4\s+讨论', text):
+                markers['discussion'] = i
+            elif re.match(r'^5\s*结\s*论', text) or re.match(r'^5\s+结论', text):
+                markers['conclusion'] = i
+            elif re.match(r'^(6\s*)?参\s*考\s*文\s*献', text):
+                markers['references'] = i
+            elif re.match(r'^(7\s*)?附\s*录', text):
+                markers['appendix'] = i
+            elif re.match(r'^(8\s*)?致\s*谢', text):
+                markers['acknowledgement'] = i
+            elif '攻读学位期间' in text or '发表论文' in text:
+                markers['publications'] = i
+
+        self.markers = markers
+        self.total_paras = n
+
+    def _add_issue(self, module, severity, location, para_index, text_preview,
+                   rule, expected, actual, source):
+        self.issues.append(Issue(
+            module=module, severity=severity, location=location,
+            para_index=para_index, text_preview=truncate(text_preview),
+            rule=rule, expected=expected, actual=actual, source=source
+        ))
+
+    # --------------------------------------------------------
+    # 检查模块 1: 页面设置
+    # --------------------------------------------------------
+    def check_page_setup(self):
+        """检查页面设置：纸张大小、页边距"""
+        module = '页面设置'
+        error_count = 0
+        total_checks = 0
+
+        for idx, section in enumerate(self.doc.sections):
+            sec_label = f'节{idx+1}'
+
+            # 纸张大小
+            total_checks += 1
+            w, h = section.page_width, section.page_height
+            if abs(w - A4_WIDTH) > SIZE_TOLERANCE or abs(h - A4_HEIGHT) > SIZE_TOLERANCE:
+                self._add_issue(module, 'error', sec_label, -1, '',
+                    '纸张须为A4标准纸', 'A4 (21cm × 29.7cm)',
+                    f'{w/360000:.1f}cm × {h/360000:.1f}cm', 'official')
+                error_count += 1
+
+            # 页边距
+            margins = {
+                '上边距': section.top_margin,
+                '下边距': section.bottom_margin,
+                '左边距': section.left_margin,
+                '右边距': section.right_margin,
+            }
+            for name, val in margins.items():
+                total_checks += 1
+                if val is not None and abs(val - TARGET_MARGIN) > MARGIN_TOLERANCE:
+                    self._add_issue(module, 'error', f'{sec_label} {name}', -1, '',
+                        f'{name}须为2.5cm', '2.5cm',
+                        f'{val/360000:.2f}cm', 'official')
+                    error_count += 1
+
+        total_checks = max(total_checks, 1)
+        score = max(0, 10 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 10)
+
+    # --------------------------------------------------------
+    # 检查模块 2: 封面
+    # --------------------------------------------------------
+    def check_cover(self):
+        """检查封面格式"""
+        module = '封面'
+        error_count = 0
+        total_checks = 6
+
+        paras = self.doc.paragraphs
+        cover_end = min(self.markers.get('declaration') or 30,
+                        self.markers.get('symbols') or 30,
+                        self.markers.get('toc') or 30,
+                        self.markers.get('abstract_cn') or 30, 50)
+
+        # 在封面范围内查找关键信息
+        found_cn_title = False
+        found_en_title = False
+        found_fields = {'分类号': False, '学科': False, '研究方向': False,
+                       '指导教师': False, '学号': False}
+
+        for i in range(min(cover_end, len(paras))):
+            text = paras[i].text.strip()
+            if not text:
+                continue
+
+            # 检测中文题目（通常是封面中最长的中文文本行之一）
+            if has_chinese(text) and len(text) > 10 and not any(k in text for k in ['大学', '学位', '论文提交', '声明', '分类号']):
+                if not found_cn_title:
+                    found_cn_title = True
+                    # 检查字体字号
+                    for run in paras[i].runs:
+                        size_pt = get_effective_font_size(run, paras[i])
+                        if size_pt and abs(size_pt - 18) > 1:  # 小二=18pt
+                            self._add_issue(module, 'error', f'第{i+1}段(中文题目)', i,
+                                text, '中文题目须为小二号', '小二(18pt)',
+                                pt_to_name(size_pt), 'official')
+                            error_count += 1
+                            break
+
+                        ea_font = get_east_asian_font(run)
+                        if ea_font and ea_font not in SIMHEI_NAMES:
+                            self._add_issue(module, 'error', f'第{i+1}段(中文题目)', i,
+                                text, '中文题目须为黑体加粗', '黑体',
+                                ea_font, 'official')
+                            error_count += 1
+                            break
+
+                        bold = get_effective_bold(run, paras[i])
+                        if bold is not True:
+                            self._add_issue(module, 'warning', f'第{i+1}段(中文题目)', i,
+                                text, '中文题目须加粗', '加粗',
+                                '未加粗', 'official')
+                            error_count += 0.5
+                            break
+
+            # 检测英文题目
+            if not has_chinese(text) and len(text) > 15 and re.search(r'[A-Z]', text):
+                if not found_en_title and not any(k in text.lower() for k in ['abstract', 'keyword', 'college', 'university']):
+                    found_en_title = True
+                    for run in paras[i].runs:
+                        font_name = run.font.name
+                        if font_name and font_name not in TNR_NAMES:
+                            self._add_issue(module, 'error', f'第{i+1}段(英文题目)', i,
+                                text, '英文题目须为Times New Roman',
+                                'Times New Roman', font_name, 'official')
+                            error_count += 1
+                            break
+                        size_pt = get_effective_font_size(run, paras[i])
+                        if size_pt and abs(size_pt - 16) > 1:  # 三号=16pt
+                            self._add_issue(module, 'error', f'第{i+1}段(英文题目)', i,
+                                text, '英文题目须为三号', '三号(16pt)',
+                                pt_to_name(size_pt), 'official')
+                            error_count += 1
+                            break
+
+            # 检测必填字段
+            for key in found_fields:
+                if key in text:
+                    found_fields[key] = True
+
+        # 检查必填字段完整性
+        for key, found in found_fields.items():
+            if not found:
+                self._add_issue(module, 'warning', '封面', -1, '',
+                    f'封面缺少"{key}"信息', f'应包含{key}', '未找到', 'official')
+                error_count += 0.5
+
+        score = max(0, 10 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 10)
+
+    # --------------------------------------------------------
+    # 检查模块 3: 摘要
+    # --------------------------------------------------------
+    def check_abstract(self):
+        """检查中英文摘要格式"""
+        module = '摘要'
+        error_count = 0
+        total_checks = 8
+        paras = self.doc.paragraphs
+
+        # 中文摘要
+        cn_idx = self.markers.get('abstract_cn')
+        en_idx = self.markers.get('abstract_en')
+
+        if cn_idx is not None:
+            # 检查标题格式
+            title_para = paras[cn_idx]
+            title_text = title_para.text.strip()
+
+            # 标题对齐：应居中
+            align = get_effective_alignment(title_para)
+            if align != WD_ALIGN_PARAGRAPH.CENTER:
+                self._add_issue(module, 'error', f'第{cn_idx+1}段(中文摘要标题)', cn_idx,
+                    title_text, '中文摘要标题须居中', '居中对齐',
+                    '非居中', 'official')
+                error_count += 1
+
+            # 标题字号：三号黑体
+            for run in title_para.runs:
+                if run.text.strip():
+                    size_pt = get_effective_font_size(run, title_para)
+                    if size_pt and abs(size_pt - 16) > 1:
+                        self._add_issue(module, 'error', f'第{cn_idx+1}段(中文摘要标题)', cn_idx,
+                            title_text, '中文摘要标题须为三号', '三号(16pt)',
+                            pt_to_name(size_pt), 'official')
+                        error_count += 1
+
+                    ea_font = get_east_asian_font(run)
+                    if ea_font and ea_font not in SIMHEI_NAMES:
+                        self._add_issue(module, 'error', f'第{cn_idx+1}段(中文摘要标题)', cn_idx,
+                            title_text, '中文摘要标题须为黑体', '黑体',
+                            ea_font, 'official')
+                        error_count += 1
+                    break
+
+            # 检查关键词
+            end_idx = en_idx if en_idx else min(cn_idx + 80, len(paras))
+            kw_found = False
+            for j in range(cn_idx + 1, end_idx):
+                text = paras[j].text.strip()
+                if re.match(r'^关\s*键\s*词', text):
+                    kw_found = True
+                    # 检查"关键词"是否加粗
+                    if paras[j].runs:
+                        first_run = paras[j].runs[0]
+                        bold = get_effective_bold(first_run, paras[j])
+                        if bold is not True:
+                            self._add_issue(module, 'error', f'第{j+1}段(关键词)', j,
+                                text, '"关键词"三字须加粗', '加粗',
+                                '未加粗', 'supplement')
+                            error_count += 1
+
+                    # 检查关键词分隔符
+                    kw_content = re.sub(r'^关\s*键\s*词\s*[：:]?\s*', '', text)
+                    if kw_content:
+                        if '；' not in kw_content and ';' not in kw_content:
+                            self._add_issue(module, 'warning', f'第{j+1}段(关键词)', j,
+                                text, '关键词之间应用分号分隔', '使用"；"分隔',
+                                '未检测到分号', 'supplement')
+                            error_count += 0.5
+
+                        # 检查关键词数量
+                        kws = re.split(r'[；;]', kw_content)
+                        kws = [k.strip() for k in kws if k.strip()]
+                        if len(kws) < 3 or len(kws) > 5:
+                            self._add_issue(module, 'warning', f'第{j+1}段(关键词)', j,
+                                text, '关键词数量应为3-5个', '3-5个',
+                                f'{len(kws)}个', 'official')
+                            error_count += 0.5
+                    break
+
+            if not kw_found:
+                self._add_issue(module, 'error', '中文摘要区域', cn_idx, '',
+                    '未找到关键词', '应有"关键词："行', '未找到', 'official')
+                error_count += 1
+        else:
+            self._add_issue(module, 'error', '全文', -1, '',
+                '未找到中文摘要', '应包含中文摘要', '未找到', 'official')
+            error_count += 3
+
+        # 英文摘要
+        if en_idx is not None:
+            title_para = paras[en_idx]
+            title_text = title_para.text.strip()
+
+            # 检查对齐
+            align = get_effective_alignment(title_para)
+            if align != WD_ALIGN_PARAGRAPH.CENTER:
+                self._add_issue(module, 'error', f'第{en_idx+1}段(Abstract标题)', en_idx,
+                    title_text, 'Abstract标题须居中', '居中对齐',
+                    '非居中', 'official')
+                error_count += 1
+
+            # 检查字号
+            for run in title_para.runs:
+                if run.text.strip():
+                    size_pt = get_effective_font_size(run, title_para)
+                    if size_pt and abs(size_pt - 16) > 1:
+                        self._add_issue(module, 'error', f'第{en_idx+1}段(Abstract标题)', en_idx,
+                            title_text, 'Abstract标题须为三号', '三号(16pt)',
+                            pt_to_name(size_pt), 'official')
+                        error_count += 1
+                    font_name = run.font.name
+                    if font_name and font_name not in TNR_NAMES:
+                        self._add_issue(module, 'error', f'第{en_idx+1}段(Abstract标题)', en_idx,
+                            title_text, 'Abstract标题须为Times New Roman',
+                            'Times New Roman', font_name, 'official')
+                        error_count += 1
+                    break
+
+            # 检查 Keywords
+            search_end = min(en_idx + 80, self.markers.get('introduction') or len(paras))
+            kw_en_found = False
+            for j in range(en_idx + 1, search_end):
+                text = paras[j].text.strip()
+                if text.lower().startswith('keyword'):
+                    kw_en_found = True
+                    if paras[j].runs:
+                        bold = get_effective_bold(paras[j].runs[0], paras[j])
+                        if bold is not True:
+                            self._add_issue(module, 'warning', f'第{j+1}段(Keywords)', j,
+                                text, '"Keywords"须加粗', '加粗',
+                                '未加粗', 'supplement')
+                            error_count += 0.5
+                    break
+            if not kw_en_found:
+                self._add_issue(module, 'warning', '英文摘要区域', en_idx, '',
+                    '未找到Keywords', '应有Keywords行', '未找到', 'official')
+                error_count += 0.5
+        else:
+            self._add_issue(module, 'error', '全文', -1, '',
+                '未找到英文摘要', '应包含Abstract', '未找到', 'official')
+            error_count += 2
+
+        score = max(0, 12 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 12)
+
+    # --------------------------------------------------------
+    # 检查模块 4: 目录
+    # --------------------------------------------------------
+    def check_toc(self):
+        """检查目录格式"""
+        module = '目录'
+        error_count = 0
+        total_checks = 3
+        paras = self.doc.paragraphs
+
+        toc_idx = self.markers.get('toc')
+        if toc_idx is None:
+            self._add_issue(module, 'error', '全文', -1, '',
+                '未找到目录', '应包含目录', '未找到', 'official')
+            self.scores[module] = (0, 8)
+            return
+
+        title_para = paras[toc_idx]
+
+        # 标题格式：三号黑体居中
+        align = get_effective_alignment(title_para)
+        if align != WD_ALIGN_PARAGRAPH.CENTER:
+            self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
+                title_para.text, '目录标题须居中', '居中',
+                '非居中', 'supplement')
+            error_count += 1
+
+        for run in title_para.runs:
+            if run.text.strip():
+                size_pt = get_effective_font_size(run, title_para)
+                if size_pt and abs(size_pt - 16) > 1:
+                    self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
+                        title_para.text, '目录标题须为三号', '三号(16pt)',
+                        pt_to_name(size_pt), 'supplement')
+                    error_count += 1
+
+                ea_font = get_east_asian_font(run)
+                if ea_font and ea_font not in SIMHEI_NAMES:
+                    self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
+                        title_para.text, '目录标题须为黑体', '黑体',
+                        ea_font, 'supplement')
+                    error_count += 1
+                break
+
+        score = max(0, 8 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 8)
+
+    # --------------------------------------------------------
+    # 检查模块 5: 正文格式
+    # --------------------------------------------------------
+    def check_body_text(self):
+        """检查正文段落字体、字号、行距、首行缩进"""
+        module = '正文格式'
+        paras = self.doc.paragraphs
+
+        # 确定正文范围
+        start = self.markers.get('introduction') or 0
+        end = self.markers.get('references') or len(paras)
+        if start == 0:
+            start = self.markers.get('abstract_cn') or 0
+
+        error_count = 0
+        checked_count = 0
+        font_errors = 0
+        size_errors = 0
+        spacing_errors = 0
+        indent_errors = 0
+        max_report_per_type = 10  # 每类问题最多报告条数
+
+        for i in range(start, min(end, len(paras))):
+            para = paras[i]
+            text = para.text.strip()
+            if not text or len(text) < 2:
+                continue
+
+            # 跳过标题段落
+            level = get_heading_level(para)
+            if level > 0:
+                continue
+
+            # 跳过图表标注行
+            if re.match(r'^(图|表|Fig|Table|Figure)\s*\d', text):
+                continue
+            if re.match(r'^(注|Note|Source)', text):
+                continue
+
+            checked_count += 1
+
+            # 检查行距
+            line_sp = get_effective_line_spacing(para)
+            if line_sp is not None and abs(line_sp - 1.5) > 0.1:
+                spacing_errors += 1
+                if spacing_errors <= max_report_per_type:
+                    self._add_issue(module, 'error', f'第{i+1}段', i, text,
+                        '正文行距须为1.5倍', '1.5倍行距',
+                        f'{line_sp:.2f}倍', 'official')
+
+            # 检查首行缩进
+            indent_cm = get_effective_first_indent(para)
+            if indent_cm is not None:
+                # 2字符 ≈ 0.74~0.85cm（小四号时）
+                if indent_cm < 0.5 or indent_cm > 1.2:
+                    indent_errors += 1
+                    if indent_errors <= max_report_per_type:
+                        self._add_issue(module, 'warning', f'第{i+1}段', i, text,
+                            '正文须首行缩进2字符', '缩进2字符(约0.74-0.85cm)',
+                            f'{indent_cm:.2f}cm', 'supplement')
+            elif indent_cm is None and checked_count <= 3:
+                # 前几段如果没有缩进信息，给个提醒
+                pass
+
+            # 检查字体字号（抽样检查 runs）
+            for run in para.runs:
+                run_text = run.text.strip()
+                if not run_text:
+                    continue
+
+                # 字号检查
+                size_pt = get_effective_font_size(run, para)
+                if size_pt and abs(size_pt - 12) > 0.6:  # 小四=12pt
+                    size_errors += 1
+                    if size_errors <= max_report_per_type:
+                        self._add_issue(module, 'error', f'第{i+1}段', i, text,
+                            '正文字号须为小四号', '小四(12pt)',
+                            pt_to_name(size_pt), 'official')
+                    break
+
+                # 中文字体检查
+                if has_chinese(run_text):
+                    ea_font = get_east_asian_font(run)
+                    if ea_font and ea_font not in SIMSUNG_NAMES:
+                        font_errors += 1
+                        if font_errors <= max_report_per_type:
+                            self._add_issue(module, 'warning', f'第{i+1}段', i, text,
+                                '正文中文须用宋体', '宋体',
+                                ea_font, 'official')
+                        break
+                else:
+                    # 英文字体检查
+                    font_name = run.font.name
+                    if font_name and font_name not in TNR_NAMES and font_name not in SIMSUNG_NAMES:
+                        font_errors += 1
+                        if font_errors <= max_report_per_type:
+                            self._add_issue(module, 'warning', f'第{i+1}段', i, text,
+                                '正文英文须用Times New Roman',
+                                'Times New Roman', font_name, 'official')
+                        break
+
+        total_errors = font_errors + size_errors + spacing_errors + indent_errors
+
+        # 如果超出报告上限，添加汇总信息
+        for label, cnt in [('字体', font_errors), ('字号', size_errors),
+                           ('行距', spacing_errors), ('缩进', indent_errors)]:
+            if cnt > max_report_per_type:
+                self._add_issue(module, 'info', '汇总', -1, '',
+                    f'共发现 {cnt} 处{label}问题', f'此处仅展示前{max_report_per_type}条',
+                    f'总计{cnt}处', 'official' if label != '缩进' else 'supplement')
+
+        checked_count = max(checked_count, 1)
+        error_rate = min(total_errors / checked_count, 1.0)
+        score = max(0, 20 * (1 - error_rate))
+        self.scores[module] = (round(score, 1), 20)
+
+    # --------------------------------------------------------
+    # 检查模块 6: 标题层级
+    # --------------------------------------------------------
+    def check_headings(self):
+        """检查标题字体、字号"""
+        module = '标题层级'
+        paras = self.doc.paragraphs
+        start = self.markers.get('introduction') or 0
+        end = self.markers.get('references') or len(paras)
+
+        error_count = 0
+        total_headings = 0
+
+        # 期望值
+        expected = {
+            1: ('三号', 16, SIMHEI_NAMES),
+            2: ('四号', 14, SIMHEI_NAMES),
+            3: ('小四号', 12, SIMHEI_NAMES),
+        }
+
+        for i in range(start, min(end, len(paras))):
+            para = paras[i]
+            level = get_heading_level(para)
+            if level == 0:
+                continue
+
+            total_headings += 1
+            text = para.text.strip()
+            exp_name, exp_pt, exp_fonts = expected[level]
+
+            for run in para.runs:
+                if not run.text.strip():
+                    continue
+
+                # 字号检查
+                size_pt = get_effective_font_size(run, para)
+                if size_pt and abs(size_pt - exp_pt) > 1:
+                    self._add_issue(module, 'error', f'第{i+1}段({level}级标题)', i,
+                        text, f'{level}级标题须为{exp_name}',
+                        f'{exp_name}({exp_pt}pt)', pt_to_name(size_pt), 'official')
+                    error_count += 1
+
+                # 字体检查（应为黑体）
+                ea_font = get_east_asian_font(run)
+                if ea_font and ea_font not in exp_fonts:
+                    self._add_issue(module, 'error', f'第{i+1}段({level}级标题)', i,
+                        text, f'{level}级标题须为黑体', '黑体',
+                        ea_font, 'official')
+                    error_count += 1
+
+                break  # 只检查第一个有文字的 run
+
+        total_headings = max(total_headings, 1)
+        score = max(0, 12 * (1 - error_count / (total_headings * 2)))
+        self.scores[module] = (round(score, 1), 12)
+
+    # --------------------------------------------------------
+    # 检查模块 7: 图表规范
+    # --------------------------------------------------------
+    def check_figures_tables(self):
+        """检查图表格式"""
+        module = '图表规范'
+        paras = self.doc.paragraphs
+        error_count = 0
+        total_checks = 0
+
+        start = self.markers.get('introduction') or 0
+        end = self.markers.get('references') or len(paras)
+
+        fig_pattern = re.compile(r'^(图|Fig\.?|Figure)\s*(\d[\d\-\.]*)')
+        tab_pattern = re.compile(r'^(表|Table)\s*(\d[\d\-\.]*)')
+
+        fig_numbers = []
+        tab_numbers = []
+
+        for i in range(start, min(end, len(paras))):
+            text = paras[i].text.strip()
+
+            # 图题检查
+            fig_m = fig_pattern.match(text)
+            if fig_m:
+                total_checks += 1
+                fig_numbers.append((fig_m.group(2), i))
+
+                # 图题应有中英文对照
+                if has_chinese(text) and not re.search(r'[A-Za-z]{3,}', text):
+                    self._add_issue(module, 'warning', f'第{i+1}段(图题)', i,
+                        text, '图题须中英文对照', '包含英文说明',
+                        '仅有中文', 'official')
+                    error_count += 1
+                elif not has_chinese(text) and re.search(r'[A-Za-z]', text):
+                    self._add_issue(module, 'warning', f'第{i+1}段(图题)', i,
+                        text, '图题须中英文对照', '包含中文说明',
+                        '仅有英文', 'official')
+                    error_count += 1
+
+            # 表题检查
+            tab_m = tab_pattern.match(text)
+            if tab_m:
+                total_checks += 1
+                tab_numbers.append((tab_m.group(2), i))
+
+                # 表题应有中英文对照
+                if has_chinese(text) and not re.search(r'[A-Za-z]{3,}', text):
+                    self._add_issue(module, 'warning', f'第{i+1}段(表题)', i,
+                        text, '表题须中英文对照', '包含英文说明',
+                        '仅有中文', 'official')
+                    error_count += 1
+                elif not has_chinese(text) and re.search(r'[A-Za-z]', text):
+                    # 英文表题下一行通常是中文，这里不重复报
+                    pass
+
+        # 检查表格是否使用三线表（通过XML检查边框）
+        for table in self.doc.tables:
+            total_checks += 1
+            tbl = table._tbl
+            tblBorders = tbl.find(f'{{{W_NS}}}tblPr/{{{W_NS}}}tblBorders')
+            if tblBorders is not None:
+                left = tblBorders.find(f'{{{W_NS}}}left')
+                right = tblBorders.find(f'{{{W_NS}}}right')
+                # 三线表左右无边框
+                has_side_borders = False
+                for side in [left, right]:
+                    if side is not None:
+                        val = side.get(f'{{{W_NS}}}val', 'none')
+                        if val not in ('none', 'nil', ''):
+                            has_side_borders = True
+
+                if has_side_borders:
+                    # 获取表格位置近似
+                    cell_text = ''
+                    if table.rows and table.rows[0].cells:
+                        cell_text = table.rows[0].cells[0].text[:30]
+                    self._add_issue(module, 'warning', '表格', -1,
+                        cell_text, '表格应采用三线表格式（无左右边框）',
+                        '三线表（上下粗线+中间细线，无左右线）',
+                        '检测到左右边框', 'supplement')
+                    error_count += 1
+
+        total_checks = max(total_checks, 1)
+        score = max(0, 10 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 10)
+
+    # --------------------------------------------------------
+    # 检查模块 8: 页眉页脚
+    # --------------------------------------------------------
+    def _get_thesis_title(self):
+        """获取论文中文题目（用户指定 > 封面提取 > 偶数页眉）"""
+        if self._user_title:
+            return self._user_title
+        # 优先从封面段落提取
+        paras = self.doc.paragraphs
+        cover_end = min(self.markers.get('declaration') or 30,
+                        self.markers.get('abstract_cn') or 30, 50)
+        skip_kw = ['大学', '学位', '论文提交', '声明', '分类号', '密级',
+                    '学号', '授予', '研究生', 'UDC', '答辩', '学科', '导师',
+                    '年月', '委员', '专业学位', 'Shandong', 'Agricultural',
+                    'Thesis', 'Degree', 'June', 'College', '代码', '指导',
+                    '研究方向', '学院', '签名', '日期', '保留']
+        for i in range(min(cover_end, len(paras))):
+            text = paras[i].text.strip()
+            # 跳过含制表符的表单行（如"密级：\t学号："）
+            if '\t' in paras[i].text:
+                continue
+            if has_chinese(text) and len(text) > 10 and not any(k in text for k in skip_kw):
+                return text
+
+        # 封面可能用文本框存题目，尝试从偶数页页眉获取
+        for section in self.doc.sections:
+            even_header = section.even_page_header
+            if not even_header.is_linked_to_previous:
+                even_text = ''.join(p.text.strip() for p in even_header.paragraphs)
+                if even_text and len(even_text) > 5:
+                    return even_text
+        return None
+
+    def _is_even_odd_headers_enabled(self):
+        """检查文档是否开启了'奇偶页不同页眉'设置"""
+        settings = self.doc.settings.element
+        eaoh = settings.find(f'{{{W_NS}}}evenAndOddHeaders')
+        if eaoh is None:
+            return False
+        # 如果元素存在但无 val 属性，默认为 true
+        val = eaoh.get(f'{{{W_NS}}}val', 'true')
+        return val.lower() not in ('false', '0', 'off')
+
+    def check_headers_footers(self):
+        """检查页眉页脚（奇数页：学校名；偶数页：论文题目）"""
+        module = '页眉页脚'
+        error_count = 0
+        total_checks = 0
+
+        ODD_HEADER_EXPECTED = '山东农业大学硕士学位论文'
+        thesis_title = self._get_thesis_title()
+        even_odd_enabled = self._is_even_odd_headers_enabled()
+
+        # 如果未开启奇偶页不同，先报告这个问题
+        if not even_odd_enabled:
+            total_checks += 1
+            self._add_issue(module, 'error', '文档设置', -1, '',
+                '未开启"奇偶页不同页眉"（规范要求奇数页为学校名、偶数页为论文题目）',
+                '开启奇偶页不同页眉',
+                '当前所有页面共用同一页眉', 'official')
+            error_count += 1
+
+        for idx, section in enumerate(self.doc.sections):
+            # 跳过第一节（封面/声明，通常不设页眉）
+            if idx == 0:
+                continue
+
+            # ---- 默认页眉（未开启奇偶页时=所有页面，开启后=奇数页）----
+            total_checks += 1
+            header = section.header
+            if not header.is_linked_to_previous:
+                default_text = ''.join(p.text.strip() for p in header.paragraphs)
+                header_label = '奇数页页眉' if even_odd_enabled else '页眉(所有页面)'
+
+                if not default_text:
+                    self._add_issue(module, 'error', f'节{idx+1} {header_label}', -1, '',
+                        f'{header_label}不应为空', ODD_HEADER_EXPECTED,
+                        '页眉为空', 'official')
+                    error_count += 1
+                elif default_text != ODD_HEADER_EXPECTED:
+                    self._add_issue(module, 'warning', f'节{idx+1} {header_label}', -1,
+                        default_text,
+                        f'{"奇数页" if even_odd_enabled else ""}页眉应为"山东农业大学硕士学位论文"',
+                        ODD_HEADER_EXPECTED, default_text, 'official')
+                    error_count += 0.5
+
+                # 页眉居中检查
+                for p in header.paragraphs:
+                    if p.text.strip():
+                        align = get_effective_alignment(p)
+                        if align is not None and align != WD_ALIGN_PARAGRAPH.CENTER:
+                            self._add_issue(module, 'warning', f'节{idx+1} {header_label}', -1,
+                                p.text.strip(), '页眉应居中', '居中',
+                                '非居中', 'supplement')
+                            error_count += 0.5
+                        break
+
+            # ---- 偶数页页眉（仅在开启奇偶页不同时检查）----
+            if even_odd_enabled:
+                total_checks += 1
+                even_header = section.even_page_header
+                if not even_header.is_linked_to_previous:
+                    even_text = ''.join(p.text.strip() for p in even_header.paragraphs)
+                    if not even_text:
+                        self._add_issue(module, 'error', f'节{idx+1} 偶数页页眉', -1, '',
+                            '偶数页页眉不应为空（应为论文题目）',
+                            thesis_title or '论文题目', '页眉为空', 'official')
+                        error_count += 1
+                    elif thesis_title and even_text != thesis_title:
+                        self._add_issue(module, 'warning', f'节{idx+1} 偶数页页眉', -1,
+                            even_text, '偶数页页眉应为论文题目',
+                            truncate(thesis_title, 40), truncate(even_text, 40), 'official')
+                        error_count += 0.5
+
+        if total_checks == 0:
+            total_checks = 1
+            self._add_issue(module, 'error', '全文', -1, '',
+                '未检测到有效页眉设置', '应设置奇偶页页眉',
+                '无页眉', 'official')
+            error_count += 1
+
+        total_checks = max(total_checks, 1)
+        score = max(0, 8 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 8)
+
+    # --------------------------------------------------------
+    # 检查模块 9: 参考文献
+    # --------------------------------------------------------
+    def check_references(self):
+        """检查参考文献格式和数量"""
+        module = '参考文献'
+        error_count = 0
+        total_checks = 4
+        paras = self.doc.paragraphs
+
+        ref_start = self.markers.get('references')
+        if ref_start is None:
+            self._add_issue(module, 'error', '全文', -1, '',
+                '未找到参考文献章节', '应包含参考文献', '未找到', 'official')
+            self.scores[module] = (0, 5)
+            return
+
+        # 确定参考文献结束位置
+        ref_end = len(paras)
+        for key in ['appendix', 'acknowledgement', 'publications']:
+            idx = self.markers.get(key)
+            if idx and idx > ref_start:
+                ref_end = min(ref_end, idx)
+                break
+
+        # 收集参考文献条目
+        ref_entries = []
+        numbered_refs = 0
+        cn_refs = []
+        en_refs = []
+
+        for i in range(ref_start + 1, ref_end):
+            text = paras[i].text.strip()
+            if not text or len(text) < 10:
+                continue
+
+            ref_entries.append((i, text))
+
+            # 检查是否有编号
+            if re.match(r'^\[\d+\]', text) or re.match(r'^\d+[\.\)]\s', text):
+                numbered_refs += 1
+
+            # 分类中英文
+            if has_chinese(text):
+                cn_refs.append(i)
+            else:
+                en_refs.append(i)
+
+        # 检查数量
+        total_refs = len(ref_entries)
+        if total_refs < 100:
+            self._add_issue(module, 'error', '参考文献', ref_start, '',
+                '硕士论文参考文献应不少于100篇', '≥100篇',
+                f'{total_refs}篇', 'official')
+            error_count += 1
+
+        # 检查外文比例
+        if total_refs > 0:
+            en_ratio = len(en_refs) / total_refs
+            if en_ratio < 0.33:
+                self._add_issue(module, 'warning', '参考文献', ref_start, '',
+                    '外文文献应占1/3以上', f'≥{total_refs//3}篇外文',
+                    f'{len(en_refs)}篇外文({en_ratio:.0%})', 'official')
+                error_count += 0.5
+
+        # 检查是否有编号（不应编号）
+        if numbered_refs > total_refs * 0.3:
+            self._add_issue(module, 'error', '参考文献', ref_start, '',
+                '参考文献不应编号，首行顶格写', '无编号',
+                f'发现{numbered_refs}条带编号', 'official')
+            error_count += 1
+
+        # 检查排序：中文在前英文在后
+        if cn_refs and en_refs:
+            last_cn = max(cn_refs)
+            first_en = min(en_refs)
+            if first_en < last_cn:
+                # 检查是否存在中英文交错
+                self._add_issue(module, 'warning', '参考文献', ref_start, '',
+                    '参考文献应中文在前，英文在后', '中文→英文',
+                    '中英文交错排列', 'official')
+                error_count += 0.5
+
+        score = max(0, 5 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 5)
+
+    # --------------------------------------------------------
+    # 检查模块 10: 结构完整性
+    # --------------------------------------------------------
+    def check_structure(self):
+        """检查论文结构是否完整"""
+        module = '其他规范'
+        error_count = 0
+        total_checks = 6
+
+        # 检查必需章节
+        section_checks = {
+            'abstract_cn': ('中文摘要', 'official'),
+            'abstract_en': ('英文摘要', 'official'),
+            'introduction': ('引言/前言', 'official'),
+            'materials': ('材料与方法', 'official'),
+            'results': ('结果与分析', 'official'),
+            'discussion': ('讨论', 'official'),
+            'conclusion': ('结论', 'official'),
+            'references': ('参考文献', 'official'),
+            'acknowledgement': ('致谢', 'official'),
+            'publications': ('攻读学位期间发表论文', 'official'),
+        }
+
+        missing = []
+        for key, (name, source) in section_checks.items():
+            if self.markers.get(key) is None:
+                missing.append(name)
+                self._add_issue(module, 'error', '论文结构', -1, '',
+                    f'缺少"{name}"章节', f'应包含{name}', '未找到', source)
+                error_count += 1
+
+        # 检查是否分章写（硕士论文不允许）
+        paras = self.doc.paragraphs
+        chapter_pattern = re.compile(r'^第[一二三四五六七八九十\d]+章')
+        for i, para in enumerate(paras):
+            if chapter_pattern.match(para.text.strip()):
+                self._add_issue(module, 'error', f'第{i+1}段', i,
+                    para.text.strip(), '硕士论文不能按章书写', '使用数字编号(1, 2, 3...)',
+                    '检测到"第X章"格式', 'official')
+                error_count += 1
+                break
+
+        total_checks = max(len(section_checks) + 1, 1)
+        score = max(0, 5 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 5)
+
+    # --------------------------------------------------------
+    # 检查模块 11: 图表编号规范
+    # --------------------------------------------------------
+    def check_numbering(self):
+        """检查图号、表号的连续性、一致性、中英文对应"""
+        module = '编号规范'
+        error_count = 0
+        total_checks = 0
+        paras = self.doc.paragraphs
+
+        start = self.markers.get('introduction') or 0
+        end = len(paras)  # 含附录
+
+        # 收集所有图号和表号
+        cn_figs = []   # (编号字符串, 段落索引, 原文)
+        en_figs = []
+        cn_tabs = []
+        en_tabs = []
+
+        fig_cn_pat = re.compile(r'^图\s*(\d[\d\-\.]*)')
+        fig_en_pat = re.compile(r'^Fig\.?\s*(\d[\d\-\.]*)', re.IGNORECASE)
+        tab_cn_pat = re.compile(r'^表\s*(\d[\d\-\.]*)')
+        tab_en_pat = re.compile(r'^Table\s*(\d[\d\-\.]*)', re.IGNORECASE)
+        # 检测缺失编号（如"表--"、"Table -"）
+        missing_num_pat = re.compile(r'^(图|表|Fig|Table)\s*[-—]{1,}')
+
+        for i in range(start, end):
+            text = paras[i].text.strip()
+            if not text:
+                continue
+
+            m = fig_cn_pat.match(text)
+            if m:
+                cn_figs.append((m.group(1), i, text))
+                continue
+            m = fig_en_pat.match(text)
+            if m:
+                en_figs.append((m.group(1), i, text))
+                continue
+            m = tab_cn_pat.match(text)
+            if m:
+                cn_tabs.append((m.group(1), i, text))
+                continue
+            m = tab_en_pat.match(text)
+            if m:
+                en_tabs.append((m.group(1), i, text))
+                continue
+
+            # 检测缺失编号
+            if missing_num_pat.match(text):
+                total_checks += 1
+                self._add_issue(module, 'error', f'第{i+1}段', i, text,
+                    '图/表编号缺失（出现"--"占位符）', '应有完整编号',
+                    '编号缺失', 'annotation')
+                error_count += 1
+
+        # --- 图号格式一致性 ---
+        total_checks += 1
+        if cn_figs:
+            has_space = sum(1 for num, idx, txt in cn_figs if re.match(r'^图\s+\d', txt))
+            no_space = sum(1 for num, idx, txt in cn_figs if re.match(r'^图\d', txt))
+            if has_space > 0 and no_space > 0:
+                self._add_issue(module, 'warning', '全文图号', -1, '',
+                    '图号格式不一致：部分用"图 X"(有空格)，部分用"图X"(无空格)',
+                    '全文统一为"图X"或"图 X"',
+                    f'"图 X"格式{has_space}处, "图X"格式{no_space}处', 'annotation')
+                error_count += 1
+
+        # --- 图号连续性 ---
+        total_checks += 1
+        if cn_figs:
+            nums = []
+            for num_str, idx, txt in cn_figs:
+                # 纯数字编号（非章节制）
+                try:
+                    nums.append((int(num_str), idx, txt))
+                except ValueError:
+                    pass  # 章节制编号如 "3-1"，单独处理
+
+            if nums:
+                nums.sort(key=lambda x: x[0])
+                for j in range(len(nums) - 1):
+                    curr_n, curr_i, curr_t = nums[j]
+                    next_n, next_i, next_t = nums[j + 1]
+                    if next_n - curr_n > 1:
+                        self._add_issue(module, 'error',
+                            f'图{curr_n}→图{next_n}', curr_i, curr_t,
+                            f'图号不连续：图{curr_n}后应为图{curr_n+1}，实际为图{next_n}',
+                            f'图{curr_n+1}', f'图{next_n}（跳号）', 'supplement')
+                        error_count += 1
+                    elif next_n == curr_n:
+                        self._add_issue(module, 'error',
+                            f'第{next_i+1}段', next_i, next_t,
+                            f'图号重复：图{curr_n}出现多次',
+                            '唯一编号', f'图{curr_n}重复', 'supplement')
+                        error_count += 1
+
+        # --- 中英文图号对应 ---
+        total_checks += 1
+        cn_fig_nums = [num for num, idx, txt in cn_figs]
+        en_fig_nums = [num for num, idx, txt in en_figs]
+        for num in cn_fig_nums:
+            if num not in en_fig_nums:
+                # 找到对应的中文图所在行
+                para_idx = next((idx for n, idx, t in cn_figs if n == num), -1)
+                self._add_issue(module, 'warning', f'图{num}', para_idx, '',
+                    f'中文图{num}缺少对应的英文Fig.{num}',
+                    f'Fig.{num}', '未找到', 'official')
+                error_count += 0.5
+        for num in en_fig_nums:
+            if num not in cn_fig_nums:
+                para_idx = next((idx for n, idx, t in en_figs if n == num), -1)
+                self._add_issue(module, 'warning', f'Fig.{num}', para_idx, '',
+                    f'英文Fig.{num}缺少对应的中文图{num}',
+                    f'图{num}', '未找到', 'official')
+                error_count += 0.5
+
+        # --- Fig 编号与图编号数字是否匹配 ---
+        total_checks += 1
+        # 配对相邻的中英文图题
+        for cn_num, cn_idx, cn_txt in cn_figs:
+            # 找紧跟其后的 Fig
+            if cn_idx + 1 < len(paras):
+                next_text = paras[cn_idx + 1].text.strip()
+                m = fig_en_pat.match(next_text)
+                if m and m.group(1) != cn_num:
+                    self._add_issue(module, 'error',
+                        f'第{cn_idx+1}-{cn_idx+2}段', cn_idx, cn_txt,
+                        f'中英文图号不匹配：图{cn_num}对应的Fig编号为{m.group(1)}',
+                        f'Fig.{cn_num}', f'Fig.{m.group(1)}', 'supplement')
+                    error_count += 1
+
+        # --- 表号连续性（章节编号制） ---
+        total_checks += 1
+        if cn_tabs:
+            # 按章节分组检查
+            chapter_tabs = {}
+            for num_str, idx, txt in cn_tabs:
+                parts = re.split(r'[-\.]', num_str)
+                if len(parts) == 2:
+                    ch, seq = parts
+                    chapter_tabs.setdefault(ch, []).append((int(seq), idx, txt))
+
+            for ch, items in chapter_tabs.items():
+                items.sort(key=lambda x: x[0])
+                for j in range(len(items) - 1):
+                    curr_seq, curr_i, curr_t = items[j]
+                    next_seq, next_i, next_t = items[j + 1]
+                    if next_seq - curr_seq > 1:
+                        self._add_issue(module, 'warning',
+                            f'表{ch}-{curr_seq}→表{ch}-{next_seq}', curr_i, curr_t,
+                            f'表号不连续：表{ch}-{curr_seq}后应为表{ch}-{curr_seq+1}',
+                            f'表{ch}-{curr_seq+1}', f'表{ch}-{next_seq}（跳号）', 'supplement')
+                        error_count += 0.5
+
+        total_checks = max(total_checks, 1)
+        score = max(0, 8 * (1 - error_count / max(total_checks, 1)))
+        self.scores[module] = (round(score, 1), 8)
+
+    # --------------------------------------------------------
+    # 检查模块 12: 单位与符号规范
+    # --------------------------------------------------------
+    def check_units_symbols(self):
+        """检查单位规范、化学式、数值单位间距"""
+        module = '单位符号'
+        paras = self.doc.paragraphs
+        start = self.markers.get('introduction') or 0
+        end = self.markers.get('references') or len(paras)
+
+        error_count = 0
+        total_checks = 0
+        max_report = 8
+
+        # 定义问题模式
+        unit_rules = [
+            # (正则, 规则描述, 期望值, 来源)
+            (re.compile(r'(?<![a-zA-Z])rpm(?![a-zA-Z])'),
+             '转速单位应使用r/min，不用rpm', 'r/min', 'annotation'),
+            (re.compile(r'(?<![a-zA-Z/])(?<!\d)ml(?![a-zA-Z])'),
+             '毫升应写mL（L大写）', 'mL', 'annotation'),
+            (re.compile(r'(?<![a-zA-Z])ul(?![a-zA-Z])'),
+             '微升应写μL（L大写）', 'μL', 'annotation'),
+            (re.compile(r'ddH20|ddh20', re.IGNORECASE),
+             '化学式ddH₂O中O是字母不是数字0', 'ddH₂O', 'annotation'),
+        ]
+
+        # 数值与单位间距检查 (如 "25℃" 应为 "25 ℃")
+        # 注意：% 和 ° 通常不加空格
+        unit_spacing_pat = re.compile(
+            r'(\d)(℃|°C|mol/L|mg/kg|μg|ng|pg|copies|CFU|IU|mmol|μmol)',
+        )
+
+        counts = {r[1]: 0 for r in unit_rules}
+        counts['数值单位间距'] = 0
+
+        for i in range(start, min(end, len(paras))):
+            text = paras[i].text
+            if not text or len(text.strip()) < 3:
+                continue
+
+            for pat, rule_desc, expected, source in unit_rules:
+                matches = pat.findall(text)
+                if matches:
+                    counts[rule_desc] += len(matches)
+                    total_checks += 1
+                    if counts[rule_desc] <= max_report:
+                        # 找到匹配位置的上下文
+                        m = pat.search(text)
+                        ctx_start = max(0, m.start() - 15)
+                        ctx_end = min(len(text), m.end() + 15)
+                        context = text[ctx_start:ctx_end]
+                        self._add_issue(module, 'warning', f'第{i+1}段', i,
+                            paras[i].text.strip(),
+                            rule_desc, expected, f'发现: ...{context}...', source)
+                        error_count += 1
+
+            # 数值单位间距
+            sp_matches = unit_spacing_pat.findall(text)
+            if sp_matches:
+                counts['数值单位间距'] += len(sp_matches)
+                total_checks += 1
+                if counts['数值单位间距'] <= max_report:
+                    m = unit_spacing_pat.search(text)
+                    ctx_s = max(0, m.start() - 10)
+                    ctx_e = min(len(text), m.end() + 10)
+                    self._add_issue(module, 'info', f'第{i+1}段', i,
+                        paras[i].text.strip(),
+                        '数值与单位之间建议加空格（%除外）',
+                        f'{m.group(1)} {m.group(2)}',
+                        f'{m.group(1)}{m.group(2)}', 'supplement')
+
+        # 汇总超出报告上限的
+        for desc, cnt in counts.items():
+            if cnt > max_report:
+                self._add_issue(module, 'info', '汇总', -1, '',
+                    f'共发现 {cnt} 处{desc}问题（仅展示前{max_report}条）',
+                    '', f'总计{cnt}处',
+                    'annotation' if '单位' not in desc else 'supplement')
+
+        total_checks = max(total_checks, 1)
+        score = max(0, 7 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 7)
+
+    # --------------------------------------------------------
+    # 检查模块 13: 内容规范
+    # --------------------------------------------------------
+    def check_content(self):
+        """检查缩写全称、引用格式、拉丁学名、标点、摘要字数"""
+        module = '内容规范'
+        paras = self.doc.paragraphs
+        error_count = 0
+        total_checks = 0
+
+        start = self.markers.get('introduction') or 0
+        end = self.markers.get('references') or len(paras)
+
+        # ---- 1. 中文摘要字数检查 ----
+        total_checks += 1
+        cn_idx = self.markers.get('abstract_cn')
+        en_idx = self.markers.get('abstract_en')
+        intro_idx = self.markers.get('introduction')
+        if cn_idx is not None:
+            abs_end = en_idx or intro_idx or (cn_idx + 80)
+            cn_abstract_text = ''
+            for j in range(cn_idx + 1, min(abs_end, len(paras))):
+                text = paras[j].text.strip()
+                if re.match(r'^(关\s*键\s*词|Keywords|Abstract)', text, re.IGNORECASE):
+                    break
+                if text and has_chinese(text):
+                    cn_abstract_text += text
+
+            cn_char_count = len(re.findall(r'[\u4e00-\u9fff]', cn_abstract_text))
+            if cn_char_count < 600:
+                self._add_issue(module, 'warning', '中文摘要', cn_idx,
+                    f'摘要共{cn_char_count}字',
+                    '硕士论文中文摘要约1000字', '约1000字',
+                    f'{cn_char_count}字（偏少）', 'official')
+                error_count += 0.5
+            elif cn_char_count > 1500:
+                self._add_issue(module, 'warning', '中文摘要', cn_idx,
+                    f'摘要共{cn_char_count}字',
+                    '硕士论文中文摘要约1000字', '约1000字',
+                    f'{cn_char_count}字（偏多）', 'official')
+                error_count += 0.5
+
+        # ---- 2. 缩写首次全称检查 ----
+        total_checks += 1
+        # 提取正文中所有大写缩写
+        abbr_pat = re.compile(r'\b([A-Z]{2,}(?:-[A-Z0-9]+)?)\b')
+        # 全称定义模式: "全称（Abbreviation，缩写）" 或 "Full Name (ABB)"
+        define_pat = re.compile(r'[（(]\s*([A-Z]{2,})\s*[,，]?\s*([A-Z]{2,})?\s*[）)]')
+
+        first_occurrences = {}  # abbr -> first para index
+        defined_abbrs = set()
+
+        for i in range(start, min(end, len(paras))):
+            text = paras[i].text
+            if not text:
+                continue
+
+            # 记录定义的缩写
+            for m in define_pat.finditer(text):
+                defined_abbrs.add(m.group(1))
+                if m.group(2):
+                    defined_abbrs.add(m.group(2))
+
+            # 也检查 "XXX, YYY" 模式在括号内
+            bracket_content = re.findall(r'[（(]([^）)]+)[）)]', text)
+            for bc in bracket_content:
+                for abb in abbr_pat.findall(bc):
+                    defined_abbrs.add(abb)
+
+            # 记录首次出现
+            for abb in abbr_pat.findall(text):
+                if abb not in first_occurrences and len(abb) >= 3:
+                    first_occurrences[abb] = i
+
+        # 常见不需要解释的缩写
+        common_abbrs = {'DNA', 'RNA', 'PCR', 'pH', 'UV', 'SDS', 'PAGE', 'EDTA',
+                        'PBS', 'DMSO', 'Fig', 'USA', 'ALV', 'SPF', 'ELISA',
+                        'qPCR', 'cDNA', 'mRNA', 'TAE', 'TBE', 'LB', 'OD',
+                        'BLAST', 'NCBI', 'MEGA', 'RT', 'ORF'}
+
+        undefined_abbrs = []
+        for abb, first_idx in first_occurrences.items():
+            if abb not in defined_abbrs and abb not in common_abbrs:
+                if not any(abb in da for da in defined_abbrs):
+                    undefined_abbrs.append((abb, first_idx))
+
+        # 只报告最多8个
+        for abb, idx in undefined_abbrs[:8]:
+            self._add_issue(module, 'info', f'第{idx+1}段', idx,
+                paras[idx].text.strip(),
+                f'缩写"{abb}"首次出现时建议附全称',
+                f'全称（{abb}）', f'直接使用{abb}', 'supplement')
+
+        if len(undefined_abbrs) > 8:
+            self._add_issue(module, 'info', '汇总', -1, '',
+                f'共{len(undefined_abbrs)}个缩写未找到首次全称定义（仅展示前8个）',
+                '', f'总计{len(undefined_abbrs)}个', 'supplement')
+
+        # ---- 3. 参考文献正文引用格式 ----
+        total_checks += 1
+        # 检查正文中是否有 (作者, 年份) 或 (Author, Year) 格式引用
+        cite_pat = re.compile(r'[（(]\s*[\u4e00-\u9fff\w]+.*?\d{4}\s*[）)]')
+        cite_count = 0
+        for i in range(start, min(end, len(paras))):
+            text = paras[i].text
+            if text:
+                cite_count += len(cite_pat.findall(text))
+
+        if cite_count < 10:
+            self._add_issue(module, 'warning', '正文', -1, '',
+                '正文中参考文献引用偏少（应在引用处标注"(作者，年份)"）',
+                '多处引用标注', f'仅检测到约{cite_count}处', 'official')
+            error_count += 0.5
+
+        # ---- 4. 图表正文引用检查 ----
+        total_checks += 1
+        # 收集正文中引用的图表号
+        body_text = ''
+        for i in range(start, min(end, len(paras))):
+            body_text += paras[i].text + '\n'
+
+        fig_ref_pat = re.compile(r'图\s*(\d+)')
+        tab_ref_pat = re.compile(r'表\s*(\d[\d\-\.]*)')
+        referenced_figs = set(fig_ref_pat.findall(body_text))
+        referenced_tabs = set(tab_ref_pat.findall(body_text))
+
+        # 找正文中定义的图号
+        defined_fig_nums = set()
+        fig_cn_pat = re.compile(r'^图\s*(\d+)')
+        for i in range(start, end):
+            m = fig_cn_pat.match(paras[i].text.strip())
+            if m:
+                defined_fig_nums.add(m.group(1))
+
+        unreferenced = defined_fig_nums - referenced_figs
+        for fig_num in sorted(unreferenced, key=lambda x: int(x) if x.isdigit() else 0):
+            self._add_issue(module, 'info', f'图{fig_num}', -1, '',
+                f'图{fig_num}未在正文中被引用',
+                '正文中应有"如图X所示"或"（图X）"', '未找到引用', 'supplement')
+
+        # ---- 5. 拉丁学名斜体检查 ----
+        total_checks += 1
+        # 常见生物学名模式
+        latin_pat = re.compile(
+            r'\b(Escherichia\s+coli|Salmonella|Staphylococcus|Streptococcus|'
+            r'Mycoplasma\s+\w+|Xanthomonas\s+\w+|Pseudomonas\s+\w+|'
+            r'Gallus\s+gallus|Rous\s+sarcoma|Avian\s+leukosis)\b'
+        )
+        non_italic_latin = 0
+        for i in range(start, min(end, len(paras))):
+            para = paras[i]
+            for run in para.runs:
+                if run.text and latin_pat.search(run.text):
+                    if not run.font.italic:
+                        non_italic_latin += 1
+                        if non_italic_latin <= 5:
+                            m = latin_pat.search(run.text)
+                            self._add_issue(module, 'warning', f'第{i+1}段', i,
+                                para.text.strip(),
+                                f'拉丁学名"{m.group()}"应使用斜体',
+                                '斜体', '正体', 'supplement')
+                            error_count += 0.5
+
+        if non_italic_latin > 5:
+            self._add_issue(module, 'info', '汇总', -1, '',
+                f'共{non_italic_latin}处拉丁学名未使用斜体（仅展示前5处）',
+                '', f'总计{non_italic_latin}处', 'supplement')
+
+        # ---- 6. 中文环境标点检查 ----
+        total_checks += 1
+        # 检查中文段落中出现英文标点
+        half_punct_in_cn = 0
+        en_punct_pat = re.compile(r'[\u4e00-\u9fff]\s*[,;:]\s*[\u4e00-\u9fff]')
+        for i in range(start, min(end, len(paras))):
+            text = paras[i].text
+            if text and has_chinese(text):
+                matches = en_punct_pat.findall(text)
+                if matches:
+                    half_punct_in_cn += len(matches)
+                    if half_punct_in_cn <= 5:
+                        m = en_punct_pat.search(text)
+                        self._add_issue(module, 'warning', f'第{i+1}段', i,
+                            text.strip(),
+                            '中文语境中应使用全角标点（，；：）而非半角（,;:）',
+                            '全角标点', f'检测到半角: ...{m.group()}...', 'supplement')
+                        error_count += 0.5
+
+        if half_punct_in_cn > 5:
+            self._add_issue(module, 'info', '汇总', -1, '',
+                f'共{half_punct_in_cn}处中文语境使用了半角标点（仅展示前5处）',
+                '', f'总计{half_punct_in_cn}处', 'supplement')
+
+        total_checks = max(total_checks, 1)
+        score = max(0, 10 * (1 - error_count / total_checks))
+        self.scores[module] = (round(score, 1), 10)
+
+    # --------------------------------------------------------
+    # 执行所有检查
+    # --------------------------------------------------------
+    def run_all_checks(self):
+        """运行全部检查模块"""
+        print('  [ 1/13] 检查页面设置...')
+        self.check_page_setup()
+        print('  [ 2/13] 检查封面...')
+        self.check_cover()
+        print('  [ 3/13] 检查摘要...')
+        self.check_abstract()
+        print('  [ 4/13] 检查目录...')
+        self.check_toc()
+        print('  [ 5/13] 检查正文格式...')
+        self.check_body_text()
+        print('  [ 6/13] 检查标题层级...')
+        self.check_headings()
+        print('  [ 7/13] 检查图表规范...')
+        self.check_figures_tables()
+        print('  [ 8/13] 检查页眉页脚...')
+        self.check_headers_footers()
+        print('  [ 9/13] 检查参考文献...')
+        self.check_references()
+        print('  [10/13] 检查结构完整性...')
+        self.check_structure()
+        print('  [11/13] 检查编号规范...')
+        self.check_numbering()
+        print('  [12/13] 检查单位符号...')
+        self.check_units_symbols()
+        print('  [13/13] 检查内容规范...')
+        self.check_content()
+
+    def get_total_score(self):
+        return sum(s[0] for s in self.scores.values())
+
+    def get_max_score(self):
+        return sum(s[1] for s in self.scores.values())
+
+    def get_report_data(self):
+        """返回结构化报告数据（供 Web 应用调用）"""
+        total = self.get_total_score()
+        max_total = self.get_max_score()
+        pct = (total / max_total * 100) if max_total > 0 else 0
+
+        if pct >= 90: grade = 'A'
+        elif pct >= 80: grade = 'B'
+        elif pct >= 70: grade = 'C'
+        elif pct >= 60: grade = 'D'
+        else: grade = 'F'
+
+        modules_order = ['页面设置', '封面', '摘要', '目录', '正文格式',
+                         '标题层级', '图表规范', '页眉页脚', '参考文献', '其他规范',
+                         '编号规范', '单位符号', '内容规范']
+        modules = []
+        for m in modules_order:
+            earned, weight = self.scores.get(m, (0, 0))
+            issues_m = [i for i in self.issues if i.module == m]
+            modules.append({
+                'name': m,
+                'earned': earned,
+                'weight': weight,
+                'pct': (earned / weight * 100) if weight > 0 else 0,
+                'errors': sum(1 for i in issues_m if i.severity == 'error'),
+                'warnings': sum(1 for i in issues_m if i.severity == 'warning'),
+                'infos': sum(1 for i in issues_m if i.severity == 'info'),
+            })
+
+        issues = []
+        for i in self.issues:
+            issues.append({
+                'module': i.module,
+                'severity': i.severity,
+                'severity_label': i.severity_label,
+                'location': i.location,
+                'para_index': i.para_index,
+                'text_preview': i.text_preview,
+                'rule': i.rule,
+                'expected': i.expected,
+                'actual': i.actual,
+                'source': i.source,
+                'source_label': i.source_label,
+            })
+
+        return {
+            'filename': self.filename,
+            'total_paras': self.total_paras,
+            'total_tables': len(self.doc.tables),
+            'total_images': len(self.doc.inline_shapes),
+            'total_score': round(total, 1),
+            'max_score': max_total,
+            'pct': round(pct, 1),
+            'grade': grade,
+            'error_count': sum(1 for i in self.issues if i.severity == 'error'),
+            'warning_count': sum(1 for i in self.issues if i.severity == 'warning'),
+            'info_count': sum(1 for i in self.issues if i.severity == 'info'),
+            'modules': modules,
+            'issues': issues,
+        }
+
+    def _generate_module_filter_buttons(self):
+        """生成模块筛选按钮 HTML"""
+        modules_order = ['页面设置', '封面', '摘要', '目录', '正文格式',
+                         '标题层级', '图表规范', '页眉页脚', '参考文献', '其他规范',
+                         '编号规范', '单位符号', '内容规范']
+        btns = []
+        for m in modules_order:
+            cnt = sum(1 for i in self.issues if i.module == m)
+            if cnt > 0:
+                btns.append(
+                    f'<button class="filter-btn" onclick="filterBy(\'module\',\'{m}\')">'
+                    f'{m} ({cnt})</button>')
+        return '\n    '.join(btns)
+
+    # --------------------------------------------------------
+    # 生成 HTML 报告
+    # --------------------------------------------------------
+    def generate_html_report(self, output_path):
+        total = self.get_total_score()
+        max_total = self.get_max_score()
+
+        # 统计
+        error_count = sum(1 for i in self.issues if i.severity == 'error')
+        warning_count = sum(1 for i in self.issues if i.severity == 'warning')
+        info_count = sum(1 for i in self.issues if i.severity == 'info')
+        official_count = sum(1 for i in self.issues if i.source == 'official')
+        supplement_count = sum(1 for i in self.issues if i.source == 'supplement')
+        annotation_count = sum(1 for i in self.issues if i.source == 'annotation')
+
+        # 评分等级和颜色
+        if total >= 90:
+            grade, grade_color = 'A (优秀)', '#22c55e'
+        elif total >= 80:
+            grade, grade_color = 'B (良好)', '#84cc16'
+        elif total >= 70:
+            grade, grade_color = 'C (中等)', '#eab308'
+        elif total >= 60:
+            grade, grade_color = 'D (及格)', '#f97316'
+        else:
+            grade, grade_color = 'F (不及格)', '#ef4444'
+
+        # 各模块数据
+        modules_order = ['页面设置', '封面', '摘要', '目录', '正文格式',
+                         '标题层级', '图表规范', '页眉页脚', '参考文献', '其他规范',
+                         '编号规范', '单位符号', '内容规范']
+
+        module_rows = ''
+        module_bars = ''
+        for m in modules_order:
+            earned, weight = self.scores.get(m, (0, 0))
+            pct = (earned / weight * 100) if weight > 0 else 0
+            issues_in_m = [i for i in self.issues if i.module == m]
+            err = sum(1 for i in issues_in_m if i.severity == 'error')
+            warn = sum(1 for i in issues_in_m if i.severity == 'warning')
+
+            if pct >= 90:
+                bar_color = '#22c55e'
+            elif pct >= 70:
+                bar_color = '#eab308'
+            else:
+                bar_color = '#ef4444'
+
+            module_rows += f'''
+            <tr>
+                <td class="module-name">{m}</td>
+                <td class="score-cell">{earned:.1f} / {weight}</td>
+                <td>
+                    <div class="bar-bg"><div class="bar-fill" style="width:{pct:.0f}%;background:{bar_color}"></div></div>
+                </td>
+                <td class="count-cell">{err}</td>
+                <td class="count-cell">{warn}</td>
+            </tr>'''
+
+            module_bars += f'''
+            <div class="radar-item">
+                <div class="radar-label">{m}</div>
+                <div class="radar-bar-bg">
+                    <div class="radar-bar" style="height:{pct:.0f}%;background:{bar_color}"></div>
+                </div>
+                <div class="radar-score">{pct:.0f}%</div>
+            </div>'''
+
+        # 问题详情表
+        issue_rows = ''
+        for idx, issue in enumerate(self.issues):
+            sev_class = {'error': 'sev-error', 'warning': 'sev-warning', 'info': 'sev-info'}[issue.severity]
+            src_class = {'official': 'src-official', 'supplement': 'src-supplement',
+                         'annotation': 'src-annotation'}.get(issue.source, 'src-supplement')
+
+            issue_rows += f'''
+            <tr class="issue-row {sev_class}-row" data-module="{issue.module}" data-severity="{issue.severity}" data-source="{issue.source}">
+                <td><span class="badge {sev_class}">{issue.severity_label}</span></td>
+                <td><span class="badge badge-module">{issue.module}</span></td>
+                <td class="location-cell">{issue.location}</td>
+                <td class="preview-cell" title="{issue.text_preview}">{issue.text_preview}</td>
+                <td>{issue.rule}</td>
+                <td class="expect-cell">{issue.expected}</td>
+                <td class="actual-cell">{issue.actual}</td>
+                <td><span class="badge {src_class}">{issue.source_label}</span></td>
+            </tr>'''
+
+        html = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>硕士毕业论文格式审查报告</title>
+<style>
+:root {{
+    --bg: #0f172a; --surface: #1e293b; --surface2: #334155;
+    --text: #e2e8f0; --text2: #94a3b8; --text3: #64748b;
+    --accent: #3b82f6; --red: #ef4444; --orange: #f97316;
+    --yellow: #eab308; --green: #22c55e; --blue: #3b82f6;
+}}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+    padding: 24px; max-width: 1400px; margin: 0 auto;
+}}
+h1 {{ font-size: 1.8rem; font-weight: 700; margin-bottom: 4px; }}
+h2 {{ font-size: 1.3rem; font-weight: 600; margin: 32px 0 16px; color: var(--text); }}
+.subtitle {{ color: var(--text2); font-size: 0.9rem; margin-bottom: 24px; }}
+
+/* 概览卡片 */
+.overview {{ display: grid; grid-template-columns: 280px 1fr; gap: 24px; margin-bottom: 32px; }}
+.score-card {{
+    background: var(--surface); border-radius: 16px; padding: 32px;
+    text-align: center; border: 1px solid var(--surface2);
+}}
+.score-big {{ font-size: 4rem; font-weight: 800; color: {grade_color}; line-height: 1; }}
+.score-max {{ font-size: 1.2rem; color: var(--text3); }}
+.grade {{ font-size: 1.4rem; font-weight: 600; color: {grade_color}; margin: 8px 0; }}
+.stats {{ display: flex; justify-content: center; gap: 16px; margin-top: 16px; }}
+.stat {{ text-align: center; }}
+.stat-num {{ font-size: 1.5rem; font-weight: 700; }}
+.stat-label {{ font-size: 0.75rem; color: var(--text3); }}
+
+/* 柱状图 */
+.chart-card {{
+    background: var(--surface); border-radius: 16px; padding: 24px;
+    border: 1px solid var(--surface2);
+}}
+.radar-container {{
+    display: flex; align-items: flex-end; justify-content: space-around;
+    height: 200px; padding: 0 8px;
+}}
+.radar-item {{ display: flex; flex-direction: column; align-items: center; flex: 1; }}
+.radar-bar-bg {{
+    width: 32px; height: 160px; background: var(--surface2); border-radius: 4px;
+    position: relative; overflow: hidden;
+}}
+.radar-bar {{
+    position: absolute; bottom: 0; width: 100%; border-radius: 4px 4px 0 0;
+    transition: height 0.5s ease;
+}}
+.radar-label {{ font-size: 0.65rem; color: var(--text3); margin-top: 6px; text-align: center; writing-mode: horizontal-tb; }}
+.radar-score {{ font-size: 0.75rem; font-weight: 600; color: var(--text2); margin-bottom: 4px; }}
+
+/* 模块详情表 */
+.module-table {{ width: 100%; border-collapse: collapse; margin-bottom: 24px; }}
+.module-table th {{
+    text-align: left; padding: 10px 12px; background: var(--surface2);
+    font-size: 0.8rem; color: var(--text2); font-weight: 600;
+}}
+.module-table td {{ padding: 10px 12px; border-bottom: 1px solid var(--surface2); font-size: 0.9rem; }}
+.module-name {{ font-weight: 600; }}
+.score-cell {{ font-weight: 700; white-space: nowrap; }}
+.count-cell {{ text-align: center; }}
+.bar-bg {{ width: 100%; height: 8px; background: var(--surface2); border-radius: 4px; overflow: hidden; }}
+.bar-fill {{ height: 100%; border-radius: 4px; transition: width 0.5s ease; }}
+
+/* 筛选器 */
+.filters {{ display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }}
+.filter-btn {{
+    padding: 6px 14px; border-radius: 20px; border: 1px solid var(--surface2);
+    background: var(--surface); color: var(--text2); cursor: pointer;
+    font-size: 0.8rem; transition: all 0.2s;
+}}
+.filter-btn:hover, .filter-btn.active {{
+    background: var(--accent); color: white; border-color: var(--accent);
+}}
+
+/* 问题表 */
+.issue-table {{ width: 100%; border-collapse: collapse; }}
+.issue-table th {{
+    text-align: left; padding: 10px 12px; background: var(--surface2);
+    font-size: 0.75rem; color: var(--text2); font-weight: 600;
+    position: sticky; top: 0; z-index: 10;
+}}
+.issue-table td {{ padding: 8px 12px; border-bottom: 1px solid rgba(51,65,85,0.5); font-size: 0.85rem; vertical-align: top; }}
+.issue-row:hover {{ background: rgba(59,130,246,0.08); }}
+.preview-cell {{ max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text3); }}
+.location-cell {{ white-space: nowrap; color: var(--text2); }}
+.expect-cell {{ color: var(--green); }}
+.actual-cell {{ color: var(--red); }}
+
+/* 徽章 */
+.badge {{
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.75rem; font-weight: 600; white-space: nowrap;
+}}
+.sev-error {{ background: rgba(239,68,68,0.15); color: #f87171; }}
+.sev-warning {{ background: rgba(234,179,8,0.15); color: #facc15; }}
+.sev-info {{ background: rgba(59,130,246,0.15); color: #60a5fa; }}
+.src-official {{ background: rgba(139,92,246,0.15); color: #a78bfa; }}
+.src-supplement {{ background: rgba(20,184,166,0.15); color: #2dd4bf; }}
+.src-annotation {{ background: rgba(251,146,60,0.15); color: #fb923c; }}
+.badge-module {{ background: var(--surface2); color: var(--text2); }}
+
+.sev-error-row td:first-child {{ border-left: 3px solid var(--red); }}
+.sev-warning-row td:first-child {{ border-left: 3px solid var(--yellow); }}
+.sev-info-row td:first-child {{ border-left: 3px solid var(--blue); }}
+
+/* 来源图例 */
+.legend {{ display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }}
+.legend-item {{ display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--text2); }}
+
+/* 打印 */
+@media print {{
+    body {{ background: white; color: #1e293b; padding: 12px; }}
+    .score-card, .chart-card {{ border: 1px solid #e2e8f0; }}
+    .filters {{ display: none; }}
+    :root {{ --surface: #f8fafc; --surface2: #e2e8f0; --text: #1e293b; --text2: #64748b; --text3: #94a3b8; }}
+    .score-big {{ color: #1e293b !important; }}
+}}
+
+/* 响应式 */
+@media (max-width: 768px) {{
+    .overview {{ grid-template-columns: 1fr; }}
+    .radar-label {{ font-size: 0.55rem; }}
+    .issue-table {{ font-size: 0.75rem; }}
+}}
+</style>
+</head>
+<body>
+
+<h1>硕士毕业论文格式审查报告</h1>
+<div class="subtitle">
+    文件：{self.filename} &nbsp;|&nbsp; 段落数：{self.total_paras} &nbsp;|&nbsp;
+    表格数：{len(self.doc.tables)} &nbsp;|&nbsp; 图片数：{len(self.doc.inline_shapes)}
+</div>
+
+<!-- 概览 -->
+<div class="overview">
+    <div class="score-card">
+        <div class="score-big">{total:.0f}</div>
+        <div class="score-max">/ {max_total}</div>
+        <div class="grade">{grade}</div>
+        <div class="stats">
+            <div class="stat"><div class="stat-num" style="color:var(--red)">{error_count}</div><div class="stat-label">错误</div></div>
+            <div class="stat"><div class="stat-num" style="color:var(--yellow)">{warning_count}</div><div class="stat-label">警告</div></div>
+            <div class="stat"><div class="stat-num" style="color:var(--blue)">{info_count}</div><div class="stat-label">建议</div></div>
+        </div>
+        <div class="stats" style="margin-top:12px">
+            <div class="stat"><div class="stat-num" style="color:#a78bfa">{official_count}</div><div class="stat-label">官方规定</div></div>
+            <div class="stat"><div class="stat-num" style="color:#2dd4bf">{supplement_count}</div><div class="stat-label">专业补充</div></div>
+            <div class="stat"><div class="stat-num" style="color:#fb923c">{annotation_count}</div><div class="stat-label">批注修订</div></div>
+        </div>
+    </div>
+    <div class="chart-card">
+        <h2 style="margin:0 0 12px">各模块得分率</h2>
+        <div class="radar-container">{module_bars}</div>
+    </div>
+</div>
+
+<!-- 模块评分 -->
+<h2>模块评分详情</h2>
+<table class="module-table">
+    <thead><tr>
+        <th>检查模块</th><th>得分</th><th>得分率</th><th>错误数</th><th>警告数</th>
+    </tr></thead>
+    <tbody>{module_rows}</tbody>
+</table>
+
+<!-- 来源图例 -->
+<div class="legend">
+    <div class="legend-item"><span class="badge src-official">官方规定</span> 学校文件明确要求的规则</div>
+    <div class="legend-item"><span class="badge src-supplement">专业补充</span> 专业排版角度补充的通用细则</div>
+    <div class="legend-item"><span class="badge src-annotation">批注修订</span> 从批注版修订意见中提炼的规则</div>
+</div>
+
+<!-- 筛选器 -->
+<h2>问题详情（共 {len(self.issues)} 条）</h2>
+<div class="filters" id="filters">
+    <button class="filter-btn active" onclick="filterAll()">全部</button>
+    <button class="filter-btn" onclick="filterBy('severity','error')" style="color:#f87171">错误 ({error_count})</button>
+    <button class="filter-btn" onclick="filterBy('severity','warning')" style="color:#facc15">警告 ({warning_count})</button>
+    <button class="filter-btn" onclick="filterBy('severity','info')" style="color:#60a5fa">建议 ({info_count})</button>
+    <span style="color:var(--text3);padding:6px">|</span>
+    <button class="filter-btn" onclick="filterBy('source','official')" style="color:#a78bfa">官方规定</button>
+    <button class="filter-btn" onclick="filterBy('source','supplement')" style="color:#2dd4bf">专业补充</button>
+    <button class="filter-btn" onclick="filterBy('source','annotation')" style="color:#fb923c">批注修订</button>
+    <span style="color:var(--text3);padding:6px">|</span>
+    {self._generate_module_filter_buttons()}
+</div>
+
+<!-- 问题表格 -->
+<div style="overflow-x:auto; border-radius: 8px; border: 1px solid var(--surface2);">
+<table class="issue-table">
+    <thead><tr>
+        <th>严重度</th><th>模块</th><th>位置</th><th>文本预览</th>
+        <th>违反规则</th><th>期望值</th><th>实际值</th><th>规则来源</th>
+    </tr></thead>
+    <tbody>{issue_rows}</tbody>
+</table>
+</div>
+
+<div style="text-align:center;color:var(--text3);font-size:0.75rem;margin-top:32px;padding:16px">
+    山东农业大学硕士毕业论文格式审查工具 v1.0 &nbsp;|&nbsp; 审查标准基于学校官方规范 + 专业排版通用细则
+</div>
+
+<script>
+function filterAll() {{
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    document.querySelectorAll('.issue-row').forEach(row => {{ row.style.display = ''; }});
+}}
+function filterBy(field, value) {{
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    document.querySelectorAll('.issue-row').forEach(row => {{
+        row.style.display = row.dataset[field] === value ? '' : 'none';
+    }});
+}}
+</script>
+
+</body>
+</html>'''
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(html)
+
+
+# ============================================================
+# 主入口
+# ============================================================
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='山东农业大学硕士毕业论文格式审查工具')
+    parser.add_argument('filepath', help='论文 .docx 文件路径')
+    parser.add_argument('--title', '-t', help='指定论文中文题目（用于偶数页页眉校验）', default=None)
+    args = parser.parse_args()
+
+    filepath = args.filepath
+    if not os.path.exists(filepath):
+        print(f'错误: 文件不存在 - {filepath}')
+        sys.exit(1)
+
+    print(f'正在审查: {os.path.basename(filepath)}')
+    if args.title:
+        print(f'论文题目: {args.title}')
+    print('=' * 50)
+
+    checker = ThesisChecker(filepath, thesis_title=args.title)
+    checker.run_all_checks()
+
+    total = checker.get_total_score()
+    max_total = checker.get_max_score()
+
+    print('=' * 50)
+    print(f'审查完成! 总分: {total:.0f} / {max_total}')
+    print(f'发现问题: {len(checker.issues)} 条')
+    print(f'  - 错误: {sum(1 for i in checker.issues if i.severity == "error")} 条')
+    print(f'  - 警告: {sum(1 for i in checker.issues if i.severity == "warning")} 条')
+    print(f'  - 建议: {sum(1 for i in checker.issues if i.severity == "info")} 条')
+
+    # 输出报告
+    output_dir = os.path.dirname(os.path.abspath(filepath))
+    output_path = os.path.join(output_dir, '格式审查报告.html')
+    checker.generate_html_report(output_path)
+    print(f'\n报告已生成: {output_path}')
+
+
+if __name__ == '__main__':
+    main()
