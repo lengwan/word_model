@@ -805,19 +805,30 @@ if uploaded_file is not None and _can_check:
                     else:
                         st.info(f"请扫码支付 {tier_price} 元")
 
-                    st.markdown(f"""
-                    <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);
-                        border-radius:10px;padding:16px;margin-top:12px;font-size:0.88rem;
-                        line-height:1.8;color:var(--text-secondary);">
-                        <div style="font-weight:700;color:var(--text-primary);margin-bottom:6px;">
-                            付款后 3 步获取兑换码：</div>
-                        1. 支付宝扫码付款 <b>{tier_price} 元</b><br>
-                        2. 添加微信 <b style="color:var(--accent-blue);">l8811925</b><br>
-                        3. 发送 <b>付款截图</b> + 报告编号
-                           <b style="color:var(--accent-blue);">{report_id}</b><br>
-                        <div style="margin-top:8px;font-size:0.8rem;color:var(--text-muted);">
-                            工作时间 5 分钟内回复 · 非工作时间 2 小时内回复</div>
-                    </div>""", unsafe_allow_html=True)
+                    # 生成付款Token（基于报告编号+套餐，不含解锁能力）
+                    if st.button("我已付款", key="paid_btn", use_container_width=True):
+                        token_raw = f"{report_id}-{tier_name}-{_get_session_id()}"
+                        token = "PAY-" + hashlib.md5(token_raw.encode()).hexdigest()[:8].upper()
+                        st.session_state['pay_token'] = token
+
+                    if 'pay_token' in st.session_state:
+                        token = st.session_state['pay_token']
+                        st.markdown(f"""
+                        <div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);
+                            border-radius:10px;padding:16px;margin-top:8px;text-align:center;">
+                            <div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:8px;">
+                                你的付款凭证 Token</div>
+                            <div style="font-size:1.3rem;font-weight:800;color:var(--accent-blue);
+                                letter-spacing:2px;margin-bottom:12px;">{token}</div>
+                            <div style="font-size:0.88rem;color:var(--text-primary);line-height:1.8;">
+                                添加微信 <b style="color:var(--accent-blue);">l8811925</b><br>
+                                发送 <b>付款截图</b> + Token <b style="color:var(--accent-blue);">{token}</b><br>
+                                确认后发你兑换码，输入右侧即可解锁</div>
+                            <div style="font-size:0.78rem;color:var(--text-muted);margin-top:8px;">
+                                工作时间 5 分钟内回复</div>
+                        </div>""", unsafe_allow_html=True)
+                    else:
+                        st.caption("付完款点击上方按钮，获取付款凭证")
 
                 with col_unlock:
                     st.markdown("##### 输入兑换码解锁")
