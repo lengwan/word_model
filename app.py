@@ -28,14 +28,79 @@ st.set_page_config(
 # ============================================================
 st.markdown("""
 <style>
+/* ============================================================
+   CSS 变量 - 自动适配亮/暗主题
+   ============================================================ */
+:root {
+    --bg-primary: #0c1222;
+    --bg-card: rgba(26,35,50,0.85);
+    --bg-card-hover: rgba(30,42,60,0.95);
+    --border-card: rgba(255,255,255,0.08);
+    --text-primary: #f1f5f9;
+    --text-secondary: #94a3b8;
+    --text-muted: #64748b;
+    --accent-blue: #3b82f6;
+    --accent-indigo: #6366f1;
+    --accent-green: #22c55e;
+    --accent-red: #ef4444;
+    --accent-yellow: #eab308;
+    --tag-bg: rgba(59,130,246,0.15);
+    --tag-border: rgba(59,130,246,0.35);
+    --tag-text: #60a5fa;
+    --metric-bg: rgba(26,35,50,0.85);
+    --metric-label: #94a3b8;
+    --paywall-gradient: rgba(12,18,34,0.95);
+    --divider: rgba(255,255,255,0.08);
+    --score-card-bg: rgba(30,42,60,0.9);
+}
+
+/* 亮色模式覆盖 */
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg-primary: #ffffff;
+        --bg-card: #f8fafc;
+        --bg-card-hover: #f1f5f9;
+        --border-card: rgba(0,0,0,0.08);
+        --text-primary: #1e293b;
+        --text-secondary: #475569;
+        --text-muted: #94a3b8;
+        --accent-blue: #2563eb;
+        --accent-indigo: #4f46e5;
+        --tag-bg: rgba(37,99,235,0.08);
+        --tag-border: rgba(37,99,235,0.25);
+        --tag-text: #2563eb;
+        --metric-bg: #f1f5f9;
+        --metric-label: #475569;
+        --paywall-gradient: rgba(255,255,255,0.95);
+        --divider: rgba(0,0,0,0.06);
+        --score-card-bg: #f1f5f9;
+    }
+}
+
+/* Streamlit 白色背景兜底 */
+[data-testid="stAppViewContainer"][style*="background-color: rgb(255"] {
+    --bg-card: #f8fafc;
+    --bg-card-hover: #f1f5f9;
+    --border-card: rgba(0,0,0,0.08);
+    --text-primary: #1e293b;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --tag-bg: rgba(37,99,235,0.08);
+    --tag-border: rgba(37,99,235,0.25);
+    --tag-text: #2563eb;
+    --metric-bg: #f1f5f9;
+    --metric-label: #475569;
+    --score-card-bg: #f1f5f9;
+}
+
 /* ---- 顶部渐变条 ---- */
 div[data-testid="stAppViewContainer"]::before {
     content:''; display:block; height:3px;
-    background:linear-gradient(90deg,#3b82f6,#8b5cf6,#ec4899,#f59e0b);
+    background:linear-gradient(90deg, var(--accent-blue), var(--accent-indigo));
     position:fixed; top:0; left:0; right:0; z-index:9999;
 }
 
-/* ---- 隐藏默认 header/footer/deploy/toast ---- */
+/* ---- 隐藏默认元素 ---- */
 header[data-testid="stHeader"] { background:transparent; }
 footer { visibility:hidden; }
 .stDeployButton, [data-testid="stToolbar"],
@@ -48,55 +113,51 @@ html, body, [class*="css"] {
     font-family: 'PingFang SC','Microsoft YaHei','Noto Sans SC',system-ui,sans-serif;
 }
 
-/* ---- Hero 区域 ---- */
+/* ---- Hero ---- */
 .hero { text-align:center; padding:48px 20px 32px; }
-.hero h1 { font-size:2.4rem; font-weight:800; margin:0 0 8px; letter-spacing:0.02em; }
-.hero p { font-size:1.05rem; color:#94a3b8; margin:0; max-width:600px; margin:0 auto; }
+.hero h1 { font-size:2.4rem; font-weight:800; margin:0 0 8px; color:var(--text-primary); }
+.hero p { font-size:1.05rem; color:var(--text-secondary); max-width:600px; margin:0 auto; }
 
 /* ---- 数字亮点 ---- */
 .highlights { display:flex; justify-content:center; gap:48px; margin:28px 0 12px; flex-wrap:wrap; }
-.hl-item { text-align:center; padding:12px 16px; border-radius:12px; background:rgba(255,255,255,0.02); transition:background 0.2s; }
-.hl-item:hover { background:rgba(255,255,255,0.05); }
-.hl-num { font-size:2.2rem; font-weight:800; line-height:1; }
-.hl-label { font-size:0.78rem; color:#64748b; margin-top:6px; letter-spacing:0.03em; }
+.hl-item { text-align:center; padding:12px 16px; border-radius:12px; }
+.hl-num { font-size:2.2rem; font-weight:800; line-height:1; color:var(--accent-blue); }
+.hl-label { font-size:0.78rem; color:var(--text-muted); margin-top:6px; }
 
 /* ---- 上传区 ---- */
 .upload-zone {
     max-width:720px; margin:0 auto 8px;
-    background:linear-gradient(135deg,rgba(59,130,246,0.08),rgba(99,102,241,0.06));
-    border:2px solid rgba(59,130,246,0.2);
+    background:var(--bg-card);
+    border:2px solid var(--tag-border);
     border-radius:16px; padding:20px 24px;
     transition: border-color 0.3s, box-shadow 0.3s;
 }
 .upload-zone:hover {
-    border-color:rgba(59,130,246,0.5);
+    border-color:var(--accent-blue);
     box-shadow:0 0 24px rgba(59,130,246,0.15);
 }
 .upload-zone::before {
     content:"上传论文，立即检测"; display:block; text-align:center;
-    font-size:1.05rem; font-weight:700; color:#e2e8f0;
+    font-size:1.05rem; font-weight:700; color:var(--text-primary);
     margin-bottom:12px; padding-bottom:12px;
-    border-bottom:1px solid rgba(255,255,255,0.06);
+    border-bottom:1px solid var(--divider);
 }
 
-/* ---- 汉化 Streamlit 文件上传组件 ---- */
+/* ---- 汉化上传组件 ---- */
 [data-testid="stFileUploaderDropzone"] [data-testid="stMarkdownContainer"] p {
     font-size:0!important; line-height:0!important;
 }
 [data-testid="stFileUploaderDropzone"] [data-testid="stMarkdownContainer"] p::after {
-    content:"拖放论文文件到此处"; font-size:0.95rem; color:#94a3b8;
+    content:"拖放论文文件到此处"; font-size:0.95rem; color:var(--text-secondary);
 }
-[data-testid="stFileUploaderDropzone"] small {
-    font-size:0!important;
-}
+[data-testid="stFileUploaderDropzone"] small { font-size:0!important; }
 [data-testid="stFileUploaderDropzone"] small::after {
-    content:"仅支持 .docx 格式，最大 50MB"; font-size:0.75rem; color:#64748b;
+    content:"仅支持 .docx 格式，最大 50MB"; font-size:0.75rem; color:var(--text-muted);
 }
 [data-testid="stFileUploaderDropzone"] button {
     font-size:0!important; min-height:42px; padding:0 24px!important;
     background:linear-gradient(135deg,#3b82f6,#6366f1)!important;
     border:none!important; border-radius:8px!important; color:white!important;
-    transition:transform 0.15s, box-shadow 0.15s;
 }
 [data-testid="stFileUploaderDropzone"] button:hover {
     transform:translateY(-1px); box-shadow:0 4px 16px rgba(59,130,246,0.4);
@@ -105,115 +166,130 @@ html, body, [class*="css"] {
     content:"选择论文文件"; font-size:0.9rem; font-weight:600;
 }
 
-/* ---- 卡片 ---- */
+/* ---- 通用卡片 ---- */
 .glass-card {
-    background:rgba(26,35,50,0.7); backdrop-filter:blur(12px);
-    border:1px solid rgba(255,255,255,0.06); border-radius:12px;
-    padding:20px; margin-bottom:12px;
+    background:var(--bg-card);
+    border:1px solid var(--border-card);
+    border-radius:12px; padding:20px; margin-bottom:12px;
     transition: transform 0.2s, box-shadow 0.2s;
 }
-.glass-card:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,0.3); }
+.glass-card:hover {
+    transform:translateY(-2px);
+    background:var(--bg-card-hover);
+    box-shadow:0 4px 16px rgba(0,0,0,0.15);
+}
 
-/* 模块卡片彩色左边条 */
-.mod-grid .glass-card { border-left:3px solid rgba(59,130,246,0.4); }
-.mod-grid .glass-card:nth-child(4n+1) { border-left-color:rgba(59,130,246,0.4); }
-.mod-grid .glass-card:nth-child(4n+2) { border-left-color:rgba(139,92,246,0.4); }
-.mod-grid .glass-card:nth-child(4n+3) { border-left-color:rgba(236,72,153,0.4); }
-.mod-grid .glass-card:nth-child(4n)   { border-left-color:rgba(245,158,11,0.4); }
-.mod-grid .glass-card:hover:nth-child(4n+1) { border-left-color:#3b82f6; }
-.mod-grid .glass-card:hover:nth-child(4n+2) { border-left-color:#8b5cf6; }
-.mod-grid .glass-card:hover:nth-child(4n+3) { border-left-color:#ec4899; }
-.mod-grid .glass-card:hover:nth-child(4n)   { border-left-color:#f59e0b; }
+/* 模块卡片左边条 */
+.mod-grid .glass-card { border-left:3px solid var(--accent-blue); }
 
 /* ---- Metric 卡片 ---- */
 div[data-testid="stMetric"] {
-    background:rgba(26,35,50,0.7); border:1px solid rgba(255,255,255,0.06);
-    border-radius:12px; padding:14px; backdrop-filter:blur(12px);
+    background:var(--metric-bg);
+    border:1px solid var(--border-card);
+    border-radius:12px; padding:14px;
 }
-div[data-testid="stMetric"] label { font-size:0.8rem!important; color:#64748b!important; }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size:1.6rem!important; }
+div[data-testid="stMetric"] label {
+    font-size:0.85rem!important; color:var(--metric-label)!important; font-weight:600!important;
+}
+div[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-size:1.8rem!important; color:var(--text-primary)!important; font-weight:700!important;
+}
 
 /* ---- 问题卡片 ---- */
 .issue-card {
     padding:14px 18px; margin-bottom:8px;
-    background:rgba(26,35,50,0.5); border-radius:0 10px 10px 0;
+    background:var(--bg-card);
+    border:1px solid var(--border-card);
+    border-radius:0 10px 10px 0;
 }
 
 /* ---- 付费墙 ---- */
 .paywall {
-    background:linear-gradient(180deg,transparent,rgba(12,18,34,0.9) 50%,rgba(12,18,34,1));
+    background:linear-gradient(180deg,transparent,var(--paywall-gradient) 50%);
     padding:80px 20px 40px; text-align:center; border-radius:12px;
     margin-top:-60px; position:relative; z-index:10;
 }
 
-/* ---- 套餐网格 ---- */
-.pricing-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:12px; }
+/* ---- 模块标签（胶囊样式）---- */
+.module-tag {
+    display:inline-block; padding:6px 16px; margin:4px;
+    border-radius:20px; font-size:0.85rem; font-weight:500;
+    background:var(--tag-bg);
+    border:1px solid var(--tag-border);
+    color:var(--tag-text);
+}
 
-/* ---- 模块表格 ---- */
+/* ---- 套餐卡片 ---- */
+.tier-free {
+    border:1px solid var(--border-card);
+    background:var(--bg-card);
+}
+.tier-free .price { color:var(--text-muted); }
+
+.tier-basic {
+    border:2px solid rgba(59,130,246,0.4);
+    background:var(--bg-card);
+}
+.tier-basic .price { color:var(--accent-blue); }
+
+.tier-pro {
+    border:2px solid rgba(99,102,241,0.6);
+    background:var(--bg-card);
+    box-shadow:0 0 24px rgba(99,102,241,0.12);
+}
+.tier-pro .price { color:var(--accent-indigo); }
+
+.original-price { color:var(--text-muted); text-decoration:line-through; font-size:0.85rem; }
+.discount-badge {
+    display:inline-block; padding:2px 10px; border-radius:4px;
+    font-size:0.75rem; font-weight:600;
+    background:rgba(99,102,241,0.2); color:var(--accent-indigo);
+}
+.recommend-badge {
+    display:inline-block; padding:2px 10px; border-radius:4px;
+    font-size:0.75rem; font-weight:600;
+    background:rgba(239,68,68,0.15); color:var(--accent-red);
+}
+.tier-feature { color:var(--text-secondary); font-size:0.85rem; line-height:1.8; }
+
+/* ---- 网格 ---- */
+.pricing-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:12px; }
 .mod-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
 
 /* ---- 环形图 ---- */
 .score-ring { text-align:center; }
 
 /* ---- 分隔线 ---- */
-.divider {
-    height:1px; margin:28px 0;
-    background:linear-gradient(90deg,transparent,rgba(255,255,255,0.1),transparent);
-}
+.divider { height:1px; margin:28px 0; background:linear-gradient(90deg,transparent,var(--divider),transparent); }
 
 /* ---- 页脚 ---- */
 .app-footer {
-    text-align:center; color:#475569; font-size:0.75rem; padding:32px 16px 16px;
-    border-top:1px solid rgba(255,255,255,0.05); margin-top:40px;
+    text-align:center; color:var(--text-muted); font-size:0.75rem;
+    padding:32px 16px 16px; border-top:1px solid var(--divider); margin-top:40px;
 }
 
-/* ---- 全局按钮美化 ---- */
+/* ---- 全局按钮 ---- */
 button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"] {
     background:linear-gradient(135deg,#3b82f6,#6366f1)!important;
     border:none!important; border-radius:10px!important; font-weight:600!important;
-    transition:transform 0.15s, box-shadow 0.15s!important;
-}
-button[kind="primary"]:hover, .stButton > button[data-testid="stBaseButton-primary"]:hover {
-    transform:translateY(-1px)!important; box-shadow:0 4px 20px rgba(59,130,246,0.4)!important;
+    color:white!important;
 }
 
-/* ---- 手机端适配 ---- */
+/* ---- 手机端 ---- */
 @media(max-width:768px) {
     .pricing-grid { grid-template-columns:1fr!important; }
     .mod-grid { grid-template-columns:repeat(2,1fr)!important; }
     .hero { padding:32px 16px 20px; }
     .hero h1 { font-size:1.75rem; }
-    .hero p { font-size:0.9rem; }
     .highlights { gap:24px 32px; }
     .upload-zone { padding:12px 16px; margin:0 8px 8px; }
     .paywall { padding:48px 16px 32px; margin-top:-40px; }
-    .mod-grid .glass-card { min-height:56px; }
 }
 @media(max-width:380px) {
     .hero h1 { font-size:1.5rem; }
     .hl-num { font-size:1.5rem; }
     .mod-grid { grid-template-columns:1fr!important; }
 }
-
-/* ---- 模块标签（胶囊样式）---- */
-.module-tag {
-    display:inline-block; padding:6px 16px; margin:4px;
-    border-radius:20px; font-size:0.85rem;
-    background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.25);
-    color:#93c5fd; transition:background 0.2s;
-}
-.module-tag:hover { background:rgba(59,130,246,0.2); }
-
-/* ---- 套餐卡片统一蓝色系 ---- */
-.tier-free { border:1px solid rgba(148,163,184,0.3); background:rgba(255,255,255,0.02); }
-.tier-free .price { color:#94a3b8; }
-.tier-basic { border:1px solid rgba(59,130,246,0.4); background:rgba(59,130,246,0.05); }
-.tier-basic .price { color:#3b82f6; }
-.tier-pro { border:2px solid rgba(99,102,241,0.6); background:linear-gradient(135deg,rgba(99,102,241,0.08),rgba(139,92,246,0.08)); box-shadow:0 0 20px rgba(99,102,241,0.15); }
-.tier-pro .price { color:#818cf8; }
-.original-price { color:#64748b; text-decoration:line-through; font-size:0.85rem; }
-.discount-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.75rem; background:rgba(99,102,241,0.2); color:#a5b4fc; }
-.recommend-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.75rem; background:rgba(239,68,68,0.15); color:#fca5a5; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -639,9 +715,9 @@ if uploaded_file is not None and _can_check:
             st.markdown(f'''
             <div class="paywall">
                 <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
-                <div style="font-size:1.2rem;font-weight:700;color:#f1f5f9;margin-bottom:6px;">
+                <div style="font-size:1.2rem;font-weight:700;color:var(--text-primary);margin-bottom:6px;">
                     还有 {len(issues)-FREE_LIMIT} 条问题待查看</div>
-                <div style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px;">
+                <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:20px;">
                     选择套餐解锁完整报告，查看全部问题的位置和修改建议</div>
             </div>''', unsafe_allow_html=True)
 
