@@ -194,6 +194,26 @@ button[kind="primary"]:hover, .stButton > button[data-testid="stBaseButton-prima
     .hl-num { font-size:1.5rem; }
     .mod-grid { grid-template-columns:1fr!important; }
 }
+
+/* ---- 模块标签（胶囊样式）---- */
+.module-tag {
+    display:inline-block; padding:6px 16px; margin:4px;
+    border-radius:20px; font-size:0.85rem;
+    background:rgba(59,130,246,0.1); border:1px solid rgba(59,130,246,0.25);
+    color:#93c5fd; transition:background 0.2s;
+}
+.module-tag:hover { background:rgba(59,130,246,0.2); }
+
+/* ---- 套餐卡片统一蓝色系 ---- */
+.tier-free { border:1px solid rgba(148,163,184,0.3); background:rgba(255,255,255,0.02); }
+.tier-free .price { color:#94a3b8; }
+.tier-basic { border:1px solid rgba(59,130,246,0.4); background:rgba(59,130,246,0.05); }
+.tier-basic .price { color:#3b82f6; }
+.tier-pro { border:2px solid rgba(99,102,241,0.6); background:linear-gradient(135deg,rgba(99,102,241,0.08),rgba(139,92,246,0.08)); box-shadow:0 0 20px rgba(99,102,241,0.15); }
+.tier-pro .price { color:#818cf8; }
+.original-price { color:#64748b; text-decoration:line-through; font-size:0.85rem; }
+.discount-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.75rem; background:rgba(99,102,241,0.2); color:#a5b4fc; }
+.recommend-badge { display:inline-block; padding:2px 8px; border-radius:4px; font-size:0.75rem; background:rgba(239,68,68,0.15); color:#fca5a5; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -418,9 +438,9 @@ st.markdown('''
     <p>别让格式问题成为你毕业的最后一道坎 —— 上传论文，快速找出所有排版问题</p>
     <div class="highlights">
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">60+</div><div class="hl-label">检查规则</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#8b5cf6;">13</div><div class="hl-label">检测模块</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#ec4899;">省90%</div><div class="hl-label">对比人工改格式</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#f59e0b;">2,400+</div><div class="hl-label">已完成检测</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">13</div><div class="hl-label">检测模块</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">省90%</div><div class="hl-label">对比人工改格式</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">2,400+</div><div class="hl-label">已完成检测</div></div>
     </div>
 </div>
 ''', unsafe_allow_html=True)
@@ -436,7 +456,7 @@ with col_title:
         placeholder="如：基于深度学习的小麦病害图像识别研究",
         label_visibility="collapsed")
 st.markdown('</div>', unsafe_allow_html=True)
-st.markdown('<p style="text-align:center;font-size:0.8rem;color:#64748b;margin:4px 0 16px;">已为 2,400+ 篇论文完成格式体检 · 检测不准确全额退款</p>', unsafe_allow_html=True)
+st.markdown('<p style="text-align:center;font-size:0.9rem;color:#94a3b8;margin:8px 0 16px;">已为 2,400+ 篇论文完成格式体检 · 检测不准确全额退款</p>', unsafe_allow_html=True)
 
 # ============================================================
 # 免费次数限制（浏览器指纹 + session_state）
@@ -569,7 +589,7 @@ if uploaded_file is not None and _can_check:
         elif pct_score >= 50: beat_pct = 20
         else: beat_pct = 8
         st.markdown(f'<p style="text-align:center;font-size:0.85rem;color:#94a3b8;margin-top:4px;">'
-            f'你的论文格式超过了 <b style="color:#f59e0b;">{beat_pct}%</b> 的论文</p>',
+            f'你的论文格式超过了 <b style="color:#818cf8;">{beat_pct}%</b> 的论文</p>',
             unsafe_allow_html=True)
     with col_metrics:
         m1, m2, m3 = st.columns(3)
@@ -631,12 +651,12 @@ if uploaded_file is not None and _can_check:
             st.markdown("#### 毕业季特惠 · 选择套餐")
             t1, t2, t3 = st.columns(3)
             with t1:
-                st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;">
+                st.markdown('''<div class="glass-card tier-free" style="text-align:center;padding:24px 16px;">
                     <div style="font-size:1rem;font-weight:700;">极简版</div>
                     <div style="margin:10px 0;">
-                        <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 19.9 元</span><br>
-                        <span style="font-size:2rem;font-weight:800;color:#3b82f6;">9.9 元</span>
-                        <span style="font-size:0.7rem;background:#3b82f622;color:#3b82f6;padding:2px 6px;border-radius:4px;">毕业季半价</span>
+                        <span class="original-price">原价 19.9 元</span><br>
+                        <span class="price" style="font-size:2rem;font-weight:800;color:#94a3b8;">9.9 元</span>
+                        <span class="discount-badge">毕业季半价</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         60+ 项规则全量扫描<br>
@@ -645,12 +665,12 @@ if uploaded_file is not None and _can_check:
                 </div>''', unsafe_allow_html=True)
                 pick_lite = st.button("选择极简版", key="pick_lite", use_container_width=True)
             with t2:
-                st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(245,158,11,0.3);">
+                st.markdown('''<div class="glass-card tier-basic" style="text-align:center;padding:24px 16px;">
                     <div style="font-size:1rem;font-weight:700;">基础版</div>
                     <div style="margin:10px 0;">
-                        <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 49.9 元</span><br>
-                        <span style="font-size:2rem;font-weight:800;color:#f59e0b;">24.9 元</span>
-                        <span style="font-size:0.7rem;background:#f59e0b22;color:#f59e0b;padding:2px 6px;border-radius:4px;">毕业季5折</span>
+                        <span class="original-price">原价 49.9 元</span><br>
+                        <span class="price" style="font-size:2rem;font-weight:800;">24.9 元</span>
+                        <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         极简版全部功能<br>
@@ -661,12 +681,12 @@ if uploaded_file is not None and _can_check:
                 </div>''', unsafe_allow_html=True)
                 pick_basic = st.button("选择基础版", key="pick_basic", use_container_width=True)
             with t3:
-                st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(236,72,153,0.3);">
-                    <div style="font-size:1rem;font-weight:700;">专业版 <span style="font-size:0.7rem;color:#ec4899;background:rgba(236,72,153,0.15);padding:2px 8px;border-radius:4px;">推荐</span></div>
+                st.markdown('''<div class="glass-card tier-pro" style="text-align:center;padding:24px 16px;">
+                    <div style="font-size:1rem;font-weight:700;">专业版 <span class="recommend-badge">推荐</span></div>
                     <div style="margin:10px 0;">
-                        <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 99.9 元</span><br>
-                        <span style="font-size:2rem;font-weight:800;color:#ec4899;">49.9 元</span>
-                        <span style="font-size:0.7rem;background:#ec489922;color:#ec4899;padding:2px 6px;border-radius:4px;">毕业季5折</span>
+                        <span class="original-price">原价 99.9 元</span><br>
+                        <span class="price" style="font-size:2rem;font-weight:800;">49.9 元</span>
+                        <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         基础版全部功能<br>
@@ -799,31 +819,18 @@ else:
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     # 模块介绍用卡片网格
-    modules_info = [
-        ("页面设置", "A4纸张、页边距2.5cm"),
-        ("封面格式", "题目字体字号、必填字段"),
-        ("摘要规范", "中英文摘要格式、关键词"),
-        ("目录格式", "标题格式、层级结构"),
-        ("正文格式", "字体字号、行距、首行缩进"),
-        ("标题层级", "一/二/三级标题字号字体"),
-        ("图表规范", "中英文对照、三线表"),
-        ("页眉页脚", "奇偶页内容、格式检查"),
-        ("参考文献", "数量、格式、排序规范"),
-        ("结构完整", "必需章节、分章检查"),
-        ("编号规范", "图表编号连续、格式一致"),
-        ("单位符号", "国际单位制、化学式"),
-        ("内容规范", "缩写全称、学名斜体、标点"),
+    modules_names = [
+        "页面设置", "封面格式", "摘要规范", "目录格式", "正文格式",
+        "标题层级", "图表规范", "页眉页脚", "参考文献", "结构完整",
+        "编号规范", "单位符号", "内容规范",
     ]
 
     st.markdown("#### 13 个检测模块全覆盖")
-    grid = '<div class="mod-grid">'
-    for name, desc in modules_info:
-        grid += f'''<div class="glass-card" style="padding:16px;">
-            <div style="font-weight:600;font-size:0.9rem;margin-bottom:4px;">{name}</div>
-            <div style="font-size:0.8rem;color:#94a3b8;">{desc}</div>
-        </div>'''
-    grid += '</div>'
-    st.markdown(grid, unsafe_allow_html=True)
+    tags = '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:20px 0;">'
+    for name in modules_names:
+        tags += f'<span class="module-tag">{name}</span>'
+    tags += '</div>'
+    st.markdown(tags, unsafe_allow_html=True)
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -831,21 +838,21 @@ else:
     st.markdown("#### 毕业季特惠 · 套餐说明")
     st.markdown('''
     <div class="pricing-grid">
-        <div class="glass-card" style="text-align:center;padding:24px 16px;">
+        <div class="glass-card tier-free" style="text-align:center;padding:24px 16px;">
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">免费体验版</div>
-            <div style="font-size:2rem;font-weight:800;color:#3b82f6;margin:12px 0;">0 元</div>
+            <div class="price" style="font-size:2rem;font-weight:800;margin:12px 0;">0 元</div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;">
                 总分 + 13个模块评分概览<br>
-                免费查看 2 条格式错误详情<br>
+                免费查看 3 条格式错误详情<br>
                 限 2 次检查机会
             </div>
         </div>
-        <div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(245,158,11,0.3);">
+        <div class="glass-card tier-basic" style="text-align:center;padding:24px 16px;">
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">基础版</div>
             <div style="margin:12px 0;">
-                <span style="font-size:0.9rem;color:#64748b;text-decoration:line-through;">原价 49.9 元</span><br>
-                <span style="font-size:2rem;font-weight:800;color:#f59e0b;">24.9 元</span>
-                <span style="font-size:0.75rem;background:#f59e0b22;color:#f59e0b;padding:2px 8px;border-radius:4px;margin-left:6px;">毕业季5折</span>
+                <span class="original-price">原价 49.9 元</span><br>
+                <span class="price" style="font-size:2rem;font-weight:800;">24.9 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 60+ 项格式规则全量扫描<br>
@@ -855,12 +862,12 @@ else:
                 含 3 次复查（初稿+修改稿+终稿）
             </div>
         </div>
-        <div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(236,72,153,0.3);">
-            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">专业版 <span style="font-size:0.7rem;color:#ec4899;background:rgba(236,72,153,0.15);padding:2px 8px;border-radius:4px;">推荐</span></div>
+        <div class="glass-card tier-pro" style="text-align:center;padding:24px 16px;">
+            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">专业版 <span class="recommend-badge">推荐</span></div>
             <div style="margin:12px 0;">
-                <span style="font-size:0.9rem;color:#64748b;text-decoration:line-through;">原价 99.9 元</span><br>
-                <span style="font-size:2rem;font-weight:800;color:#ec4899;">49.9 元</span>
-                <span style="font-size:0.75rem;background:#ec489922;color:#ec4899;padding:2px 8px;border-radius:4px;margin-left:6px;">毕业季5折</span>
+                <span class="original-price">原价 99.9 元</span><br>
+                <span class="price" style="font-size:2rem;font-weight:800;">49.9 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 基础版全部功能<br>
@@ -872,7 +879,7 @@ else:
         </div>
     </div>
     <div style="text-align:center;font-size:0.8rem;color:#64748b;margin-bottom:20px;">
-        邀请同学使用你的专属邀请码购买，双方各返 <b style="color:#f59e0b;">5 元</b>（付费后自动获得邀请码）
+        邀请同学使用你的专属邀请码购买，双方各返 <b style="color:#818cf8;">5 元</b>（付费后自动获得邀请码）
     </div>
     ''', unsafe_allow_html=True)
 
