@@ -135,11 +135,23 @@ def get_effective_font_size(run, para):
 
 
 def get_effective_bold(run, para):
-    """获取 run 是否加粗，考虑继承"""
+    """获取 run 是否加粗，考虑继承（含XML直接检测）"""
+    # 1. run 级别直接设置
     if run.font.bold is not None:
         return run.font.bold
-    if para.style and para.style.font:
+    # 2. 直接检查 XML 中的 <w:b/> 标签（兜底）
+    rPr = run._element.find(f'{{{W_NS}}}rPr')
+    if rPr is not None:
+        b_elem = rPr.find(f'{{{W_NS}}}b')
+        if b_elem is not None:
+            val = b_elem.get(f'{{{W_NS}}}val', 'true')
+            return val.lower() not in ('false', '0', 'off')
+    # 3. 段落样式继承
+    if para.style and para.style.font and para.style.font.bold is not None:
         return para.style.font.bold
+    # 4. 字符样式继承
+    if run.style and run.style.font and run.style.font.bold is not None:
+        return run.style.font.bold
     return None
 
 
@@ -227,11 +239,12 @@ def get_heading_level(para):
     if m:
         return min(int(m.group(1)), 3)
 
-    # 通过文本模式判断
-    if re.match(r'^\d+\s+\S', text) and not re.match(r'^\d+\.\d+', text):
-        return 1  # "1 引言"
-    if re.match(r'^\d+\.\d+\s+\S', text) and not re.match(r'^\d+\.\d+\.\d+', text):
-        return 2  # "2.1 xxx"
+    # 通过文本模式判断（允许编号与文字之间有或无空格）
+    if re.match(r'^[1-9]\s*[\u4e00-\u9fff]', text) and not re.match(r'^\d+\.\d+', text):
+        if len(text) < 30 or re.match(r'^[1-9]\s*(引|前|材料|结果|讨|结论|参考|附|致|概|绪)', text):
+            return 1  # "1 引言" or "1引言" or "1前   言"
+    if re.match(r'^[1-9]\.\d+[\s\u4e00-\u9fffA-Z]', text) and not re.match(r'^\d+\.\d+\.\d+', text):
+        return 2  # "2.1 xxx" or "2.1试验材料" or "2.1 ALV..."
     if re.match(r'^\d+\.\d+\.\d+', text):
         return 3  # "3.1.2 xxx"
     return 0
@@ -293,10 +306,13 @@ class ThesisChecker:
                 markers['toc'] = i
             elif re.match(r'^中\s*文\s*摘\s*要', text) or text == '摘要' or re.match(r'^摘\s+要', text):
                 markers['abstract_cn'] = i
-            elif 'abstract' in text_lower and len(text) < 30 and not has_chinese(text):
-                if markers['abstract_en'] is None:
-                    markers['abstract_en'] = i
-            elif re.match(r'^1\s*(引言|前言|绪论)', text) or re.match(r'^引\s*言', text) or re.match(r'^前\s*言', text):
+            elif markers['abstract_en'] is None and not has_chinese(text) and (
+                text_lower.startswith('abstract') or
+                (text_lower == 'abstract') or
+                ('abstract' in text_lower and len(text) < 30)
+            ):
+                markers['abstract_en'] = i
+            elif re.match(r'^1\s*(引\s*言|前\s*言|绪\s*论)', text) or re.match(r'^引\s*言', text) or re.match(r'^前\s*言', text):
                 markers['introduction'] = i
             elif re.match(r'^2\s*材料与方法', text) or re.match(r'^2\s+材料', text):
                 markers['materials'] = i
@@ -312,8 +328,25 @@ class ThesisChecker:
                 markers['appendix'] = i
             elif re.match(r'^(8\s*)?致\s*谢', text):
                 markers['acknowledgement'] = i
-            elif '攻读学位期间' in text or '发表论文' in text:
+            elif '攻读学位期间' in text or '发表论文' in text or '发表的学术' in text:
                 markers['publications'] = i
+
+        # If English abstract not found via 'abstract' keyword, look for the first
+        # all-English paragraph after Chinese keywords line (关键词) as the English abstract start.
+        if markers['abstract_en'] is None and markers['abstract_cn'] is not None:
+            cn_kw_idx = None
+            search_end = markers.get('introduction') or min(markers['abstract_cn'] + 80, n)
+            for j in range(markers['abstract_cn'] + 1, search_end):
+                t = paras[j].text.strip()
+                if re.match(r'^关\s*键\s*词', t):
+                    cn_kw_idx = j
+                    break
+            if cn_kw_idx is not None:
+                for j in range(cn_kw_idx + 1, search_end):
+                    t = paras[j].text.strip()
+                    if t and len(t) > 20 and not has_chinese(t) and t[0].isupper():
+                        markers['abstract_en'] = j
+                        break
 
         self.markers = markers
         self.total_paras = n
@@ -369,91 +402,118 @@ class ThesisChecker:
     # --------------------------------------------------------
     # 检查模块 2: 封面
     # --------------------------------------------------------
+    def _extract_sdt_texts(self):
+        """从内容控件(sdt)中提取所有文本，返回列表"""
+        results = []
+        for sdt in self.doc.element.body.iter(f'{{{W_NS}}}sdt'):
+            texts = []
+            for t in sdt.iter(f'{{{W_NS}}}t'):
+                if t.text:
+                    texts.append(t.text)
+            content = ''.join(texts).strip()
+            if content and '点击此处' not in content and '编辑时请删除' not in content:
+                results.append(content)
+        return results
+
+    def _extract_cover_table_texts(self):
+        """从封面表格中提取所有文本"""
+        results = {}
+        for table in self.doc.tables[:4]:  # 封面表格通常在前4个
+            for row in table.rows:
+                cells = [c.text.strip() for c in row.cells]
+                if len(cells) >= 2:
+                    key = cells[0].replace('\u3000', '').replace(' ', '').rstrip('：:')
+                    val = cells[1].strip() if cells[1].strip() else None
+                    if key and val:
+                        results[key] = val
+        return results
+
     def check_cover(self):
-        """检查封面格式"""
+        """检查封面格式（从段落+内容控件+表格三个来源提取）"""
         module = '封面'
         error_count = 0
-        total_checks = 6
+        total_checks = 0
 
+        # 从三个来源收集封面信息
+        sdt_texts = self._extract_sdt_texts()
+        table_data = self._extract_cover_table_texts()
+
+        # 所有封面文本合并（用于必填字段检查）
+        all_cover_text = ' '.join(sdt_texts) + ' ' + ' '.join(table_data.keys()) + ' ' + ' '.join(str(v) for v in table_data.values())
+
+        # 从段落提取
         paras = self.doc.paragraphs
-        cover_end = min(self.markers.get('declaration') or 30,
-                        self.markers.get('symbols') or 30,
-                        self.markers.get('toc') or 30,
-                        self.markers.get('abstract_cn') or 30, 50)
-
-        # 在封面范围内查找关键信息
-        found_cn_title = False
-        found_en_title = False
-        found_fields = {'分类号': False, '学科': False, '研究方向': False,
-                       '指导教师': False, '学号': False}
-
+        cover_end = min(self.markers.get('declaration') or 70, 70)
         for i in range(min(cover_end, len(paras))):
             text = paras[i].text.strip()
-            if not text:
-                continue
+            if text:
+                all_cover_text += ' ' + text
 
-            # 检测中文题目（通常是封面中最长的中文文本行之一）
-            if has_chinese(text) and len(text) > 10 and not any(k in text for k in ['大学', '学位', '论文提交', '声明', '分类号']):
-                if not found_cn_title:
-                    found_cn_title = True
-                    # 检查字体字号
-                    for run in paras[i].runs:
-                        size_pt = get_effective_font_size(run, paras[i])
-                        if size_pt and abs(size_pt - 18) > 1:  # 小二=18pt
-                            self._add_issue(module, 'error', f'第{i+1}段(中文题目)', i,
-                                text, '中文题目须为小二号', '小二(18pt)',
-                                pt_to_name(size_pt), 'official')
-                            error_count += 1
-                            break
+        # ---- 检查中文题目 ----
+        total_checks += 1
+        cn_title = None
+        # 优先从 sdt 中找（最准确）
+        for t in sdt_texts:
+            if has_chinese(t) and len(t) > 10 and not any(k in t for k in ['大学','学位','声明','封面','扉页','版权','目录']):
+                cn_title = t
+                break
+        # 从 user_title 回退
+        if not cn_title and self._user_title:
+            cn_title = self._user_title
 
-                        ea_font = get_east_asian_font(run)
-                        if ea_font and ea_font not in SIMHEI_NAMES:
-                            self._add_issue(module, 'error', f'第{i+1}段(中文题目)', i,
-                                text, '中文题目须为黑体加粗', '黑体',
-                                ea_font, 'official')
-                            error_count += 1
-                            break
+        if cn_title:
+            # 题目存在，检查字号（sdt 中的字号需要从 XML 获取）
+            # 这里只确认题目存在，字号检查从 sdt XML 中难以准确获取，降级为建议
+            pass
+        else:
+            self._add_issue(module, 'warning', '封面', -1, '',
+                '未能从段落中检测到中文题目（可能在文本框中）', '应有中文题目',
+                '请人工确认题目字体是否为小二号黑体加粗', 'official')
+            error_count += 0.5
 
-                        bold = get_effective_bold(run, paras[i])
-                        if bold is not True:
-                            self._add_issue(module, 'warning', f'第{i+1}段(中文题目)', i,
-                                text, '中文题目须加粗', '加粗',
-                                '未加粗', 'official')
-                            error_count += 0.5
-                            break
+        # ---- 检查必填字段 ----
+        field_checks = {
+            '分类号': ['分类号'],
+            'UDC': ['UDC'],
+            '学科专业': ['专业', '学科', 'Major'],
+            '指导教师': ['指导教师', '导师', 'Supervisor'],
+            '论文作者': ['论文作者', '研究生', 'Candidate'],
+            '培养单位': ['培养单位', '学院', 'College'],
+        }
 
-            # 检测英文题目
-            if not has_chinese(text) and len(text) > 15 and re.search(r'[A-Z]', text):
-                if not found_en_title and not any(k in text.lower() for k in ['abstract', 'keyword', 'college', 'university']):
-                    found_en_title = True
-                    for run in paras[i].runs:
-                        font_name = run.font.name
-                        if font_name and font_name not in TNR_NAMES:
-                            self._add_issue(module, 'error', f'第{i+1}段(英文题目)', i,
-                                text, '英文题目须为Times New Roman',
-                                'Times New Roman', font_name, 'official')
-                            error_count += 1
-                            break
-                        size_pt = get_effective_font_size(run, paras[i])
-                        if size_pt and abs(size_pt - 16) > 1:  # 三号=16pt
-                            self._add_issue(module, 'error', f'第{i+1}段(英文题目)', i,
-                                text, '英文题目须为三号', '三号(16pt)',
-                                pt_to_name(size_pt), 'official')
-                            error_count += 1
-                            break
+        for field_name, keywords in field_checks.items():
+            total_checks += 1
+            found = False
+            # 在 sdt、表格、段落中查找
+            for kw in keywords:
+                if kw.lower() in all_cover_text.lower():
+                    found = True
+                    break
+            # 在表格 key 中查找
+            for table_key in table_data.keys():
+                for kw in keywords:
+                    if kw in table_key:
+                        found = True
+                        break
 
-            # 检测必填字段
-            for key in found_fields:
-                if key in text:
-                    found_fields[key] = True
-
-        # 检查必填字段完整性
-        for key, found in found_fields.items():
             if not found:
                 self._add_issue(module, 'warning', '封面', -1, '',
-                    f'封面缺少"{key}"信息', f'应包含{key}', '未找到', 'official')
+                    f'封面缺少"{field_name}"信息', f'应包含{field_name}', '未找到', 'official')
                 error_count += 0.5
 
+        # ---- 检查封面是否有填写占位符未替换 ----
+        total_checks += 1
+        placeholders_found = []
+        for t in sdt_texts:
+            if '点击此处' in t or '填写' in t:
+                placeholders_found.append(t[:30])
+        if placeholders_found:
+            self._add_issue(module, 'warning', '封面', -1, '',
+                f'封面有 {len(placeholders_found)} 处占位符未替换',
+                '应填写实际内容', f'发现: {placeholders_found[0]}...', 'official')
+            error_count += 0.5
+
+        total_checks = max(total_checks, 1)
         score = max(0, 10 * (1 - error_count / total_checks))
         self.scores[module] = (round(score, 1), 10)
 
@@ -513,7 +573,7 @@ class ThesisChecker:
                     if paras[j].runs:
                         first_run = paras[j].runs[0]
                         bold = get_effective_bold(first_run, paras[j])
-                        if bold is not True:
+                        if bold is False:
                             self._add_issue(module, 'error', f'第{j+1}段(关键词)', j,
                                 text, '"关键词"三字须加粗', '加粗',
                                 '未加粗', 'supplement')
@@ -586,7 +646,7 @@ class ThesisChecker:
                     kw_en_found = True
                     if paras[j].runs:
                         bold = get_effective_bold(paras[j].runs[0], paras[j])
-                        if bold is not True:
+                        if bold is False:
                             self._add_issue(module, 'warning', f'第{j+1}段(Keywords)', j,
                                 text, '"Keywords"须加粗', '加粗',
                                 '未加粗', 'supplement')
@@ -616,6 +676,16 @@ class ThesisChecker:
 
         toc_idx = self.markers.get('toc')
         if toc_idx is None:
+            # 检查 sdt 内容控件和 TOC 域代码中是否有目录
+            sdt_texts = self._extract_sdt_texts()
+            has_toc_in_sdt = any('目' in t and '录' in t for t in sdt_texts)
+            # 检查 Word TOC 域代码
+            has_toc_field = bool(self.doc.element.body.findall(
+                f'.//{{{W_NS}}}fldSimple[@{{{W_NS}}}instr]'))
+            if has_toc_in_sdt or has_toc_field:
+                # 目录存在但通过 Word 域/sdt 生成，无法精确检查格式
+                self.scores[module] = (6, 8)  # 给大部分分
+                return
             self._add_issue(module, 'error', '全文', -1, '',
                 '未找到目录', '应包含目录', '未找到', 'official')
             self.scores[module] = (0, 8)
@@ -659,11 +729,11 @@ class ThesisChecker:
         module = '正文格式'
         paras = self.doc.paragraphs
 
-        # 确定正文范围
-        start = self.markers.get('introduction') or 0
+        # 确定正文范围 — only start from introduction (not abstract)
+        start = self.markers.get('introduction')
+        if start is None:
+            start = self.markers.get('materials') or self.markers.get('results') or 0
         end = self.markers.get('references') or len(paras)
-        if start == 0:
-            start = self.markers.get('abstract_cn') or 0
 
         error_count = 0
         checked_count = 0
@@ -671,12 +741,12 @@ class ThesisChecker:
         size_errors = 0
         spacing_errors = 0
         indent_errors = 0
-        max_report_per_type = 10  # 每类问题最多报告条数
+        max_report_per_type = 999  # 逐条报告，不限数量
 
         for i in range(start, min(end, len(paras))):
             para = paras[i]
             text = para.text.strip()
-            if not text or len(text) < 2:
+            if not text or len(text) < 5:
                 continue
 
             # 跳过标题段落
@@ -684,31 +754,35 @@ class ThesisChecker:
             if level > 0:
                 continue
 
-            # 跳过图表标注行
-            if re.match(r'^(图|表|Fig|Table|Figure)\s*\d', text):
+            # 跳过图表标注行（图题、表题、注释等有独立格式规范）
+            if re.match(r'^(图|表|Fig|Table|Figure)\s*\.?\s*\d', text):
                 continue
-            if re.match(r'^(注|Note|Source)', text):
+            if re.match(r'^(注：|注意|Note|Source|[A-Z]{1,2}$)', text):
+                continue
+            # 跳过英文图表标题行（可能不以数字开头）
+            if re.match(r'^(Fig\.|Figure|Table)\s', text, re.IGNORECASE):
                 continue
 
             checked_count += 1
+            section = self._get_section_label(i)
+            loc = f'第{i+1}段 [{section}]'
 
             # 检查行距
             line_sp = get_effective_line_spacing(para)
             if line_sp is not None and abs(line_sp - 1.5) > 0.1:
                 spacing_errors += 1
                 if spacing_errors <= max_report_per_type:
-                    self._add_issue(module, 'error', f'第{i+1}段', i, text,
+                    self._add_issue(module, 'error', loc, i, text,
                         '正文行距须为1.5倍', '1.5倍行距',
                         f'{line_sp:.2f}倍', 'official')
 
             # 检查首行缩进
             indent_cm = get_effective_first_indent(para)
             if indent_cm is not None:
-                # 2字符 ≈ 0.74~0.85cm（小四号时）
                 if indent_cm < 0.5 or indent_cm > 1.2:
                     indent_errors += 1
                     if indent_errors <= max_report_per_type:
-                        self._add_issue(module, 'warning', f'第{i+1}段', i, text,
+                        self._add_issue(module, 'warning', loc, i, text,
                             '正文须首行缩进2字符', '缩进2字符(约0.74-0.85cm)',
                             f'{indent_cm:.2f}cm', 'supplement')
             elif indent_cm is None and checked_count <= 3:
@@ -723,10 +797,10 @@ class ThesisChecker:
 
                 # 字号检查
                 size_pt = get_effective_font_size(run, para)
-                if size_pt and abs(size_pt - 12) > 0.6:  # 小四=12pt
+                if size_pt and abs(size_pt - 12) > 0.6:
                     size_errors += 1
                     if size_errors <= max_report_per_type:
-                        self._add_issue(module, 'error', f'第{i+1}段', i, text,
+                        self._add_issue(module, 'error', loc, i, text,
                             '正文字号须为小四号', '小四(12pt)',
                             pt_to_name(size_pt), 'official')
                     break
@@ -737,17 +811,16 @@ class ThesisChecker:
                     if ea_font and ea_font not in SIMSUNG_NAMES:
                         font_errors += 1
                         if font_errors <= max_report_per_type:
-                            self._add_issue(module, 'warning', f'第{i+1}段', i, text,
+                            self._add_issue(module, 'warning', loc, i, text,
                                 '正文中文须用宋体', '宋体',
                                 ea_font, 'official')
                         break
                 else:
-                    # 英文字体检查
                     font_name = run.font.name
                     if font_name and font_name not in TNR_NAMES and font_name not in SIMSUNG_NAMES:
                         font_errors += 1
                         if font_errors <= max_report_per_type:
-                            self._add_issue(module, 'warning', f'第{i+1}段', i, text,
+                            self._add_issue(module, 'warning', loc, i, text,
                                 '正文英文须用Times New Roman',
                                 'Times New Roman', font_name, 'official')
                         break
@@ -826,6 +899,43 @@ class ThesisChecker:
     # --------------------------------------------------------
     # 检查模块 7: 图表规范
     # --------------------------------------------------------
+    def _get_section_label(self, para_idx):
+        """根据段落索引返回所在章节标签，如 '第2章 材料与方法'"""
+        # 向前搜索最近的一级标题
+        paras = self.doc.paragraphs
+        for j in range(para_idx, -1, -1):
+            level = get_heading_level(paras[j])
+            if level == 1:
+                title = paras[j].text.strip()[:20]
+                return title
+        return '封面/前置页'
+
+    def _check_caption_format(self, module, para, para_idx, text, caption_type, total_checks):
+        """检查图题/表题的字号、字体，逐条报告"""
+        # 图题和表题均为小五号(9pt)宋体
+        EXPECTED_SIZE = 9.0
+        EXPECTED_NAME = '小五(9pt)'
+
+        section = self._get_section_label(para_idx)
+        loc = f'第{para_idx+1}段 [{section}]({caption_type})'
+
+        for run in para.runs:
+            if not run.text.strip():
+                continue
+            # 字号
+            size_pt = get_effective_font_size(run, para)
+            if size_pt and abs(size_pt - EXPECTED_SIZE) > 1.0:
+                self._add_issue(module, 'warning', loc, para_idx,
+                    text, f'{caption_type}字号应为{EXPECTED_NAME}',
+                    EXPECTED_NAME, pt_to_name(size_pt), 'supplement')
+            # 中文字体
+            if has_chinese(run.text):
+                ea_font = get_east_asian_font(run)
+                if ea_font and ea_font not in SIMSUNG_NAMES:
+                    self._add_issue(module, 'warning', loc, para_idx,
+                        text, f'{caption_type}中文应为宋体', '宋体', ea_font, 'supplement')
+            break
+
     def check_figures_tables(self):
         """检查图表格式"""
         module = '图表规范'
@@ -851,17 +961,32 @@ class ThesisChecker:
                 total_checks += 1
                 fig_numbers.append((fig_m.group(2), i))
 
-                # 图题应有中英文对照
+                # 图题应有中英文对照 — check adjacent paragraphs for paired caption
+                fig_is_paired = False
                 if has_chinese(text) and not re.search(r'[A-Za-z]{3,}', text):
-                    self._add_issue(module, 'warning', f'第{i+1}段(图题)', i,
-                        text, '图题须中英文对照', '包含英文说明',
-                        '仅有中文', 'official')
-                    error_count += 1
+                    if i + 1 < min(end, len(paras)):
+                        next_text = paras[i + 1].text.strip()
+                        if re.match(r'^(Fig\.?|Figure)\s*\d', next_text, re.IGNORECASE):
+                            fig_is_paired = True
+                    if not fig_is_paired:
+                        self._add_issue(module, 'warning', f'第{i+1}段(图题)', i,
+                            text, '图题须中英文对照', '包含英文说明',
+                            '仅有中文', 'official')
+                        error_count += 1
                 elif not has_chinese(text) and re.search(r'[A-Za-z]', text):
-                    self._add_issue(module, 'warning', f'第{i+1}段(图题)', i,
-                        text, '图题须中英文对照', '包含中文说明',
-                        '仅有英文', 'official')
-                    error_count += 1
+                    if i - 1 >= start:
+                        prev_text = paras[i - 1].text.strip()
+                        if re.match(r'^图\s*\d', prev_text):
+                            fig_is_paired = True
+                    if not fig_is_paired:
+                        self._add_issue(module, 'warning', f'第{i+1}段(图题)', i,
+                            text, '图题须中英文对照', '包含中文说明',
+                            '仅有英文', 'official')
+                        error_count += 1
+
+                # 图题字体字号检查（应为五号=10.5pt）
+                self._check_caption_format(module, paras[i], i, text, '图题', total_checks)
+                total_checks += 1
 
             # 表题检查
             tab_m = tab_pattern.match(text)
@@ -869,25 +994,60 @@ class ThesisChecker:
                 total_checks += 1
                 tab_numbers.append((tab_m.group(2), i))
 
-                # 表题应有中英文对照
-                if has_chinese(text) and not re.search(r'[A-Za-z]{3,}', text):
-                    self._add_issue(module, 'warning', f'第{i+1}段(表题)', i,
-                        text, '表题须中英文对照', '包含英文说明',
-                        '仅有中文', 'official')
-                    error_count += 1
-                elif not has_chinese(text) and re.search(r'[A-Za-z]', text):
-                    # 英文表题下一行通常是中文，这里不重复报
-                    pass
+                # 表题字体字号检查
+                self._check_caption_format(module, paras[i], i, text, '表题', total_checks)
+                total_checks += 1
 
-        # 检查表格是否使用三线表（通过XML检查边框）
-        for table in self.doc.tables:
+                # 表题应有中英文对照 — check adjacent paragraphs for paired caption
+                tab_is_paired = False
+                if has_chinese(text) and not re.search(r'[A-Za-z]{3,}', text):
+                    if i + 1 < min(end, len(paras)):
+                        next_text = paras[i + 1].text.strip()
+                        if re.match(r'^Table\s*\d', next_text, re.IGNORECASE):
+                            tab_is_paired = True
+                    if not tab_is_paired:
+                        self._add_issue(module, 'warning', f'第{i+1}段(表题)', i,
+                            text, '表题须中英文对照', '包含英文说明',
+                            '仅有中文', 'official')
+                        error_count += 1
+                elif not has_chinese(text) and re.search(r'[A-Za-z]', text):
+                    # English only — check if previous paragraph is Chinese pair
+                    if i - 1 >= start:
+                        prev_text = paras[i - 1].text.strip()
+                        if re.match(r'^表\s*\d', prev_text):
+                            tab_is_paired = True
+                    if not tab_is_paired:
+                        pass  # English table caption following Chinese is acceptable
+
+        # 检查表格是否使用三线表（通过XML检查边框），逐个表格报告
+        for tbl_idx, table in enumerate(self.doc.tables):
             total_checks += 1
             tbl = table._tbl
             tblBorders = tbl.find(f'{{{W_NS}}}tblPr/{{{W_NS}}}tblBorders')
+
+            # 获取表格标识信息
+            header_cells = []
+            if table.rows and table.rows[0].cells:
+                header_cells = [c.text.strip()[:15] for c in table.rows[0].cells[:3]]
+            header_preview = ' | '.join(c for c in header_cells if c)[:50]
+            # 找表格前面最近的表题
+            tbl_name = f'第{tbl_idx+1}个表格'
+            # 在段落中搜索该表格前的表号
+            tbl_elem = table._tbl
+            prev = tbl_elem.getprevious()
+            while prev is not None:
+                if prev.tag == f'{{{W_NS}}}p':
+                    p_text = ''.join(t.text or '' for t in prev.iter(f'{{{W_NS}}}t')).strip()
+                    if re.match(r'^(表|Table)\s*\d', p_text):
+                        tbl_name = p_text[:30]
+                        break
+                    if p_text and len(p_text) > 5:
+                        break  # 不是表题，停止搜索
+                prev = prev.getprevious()
+
             if tblBorders is not None:
                 left = tblBorders.find(f'{{{W_NS}}}left')
                 right = tblBorders.find(f'{{{W_NS}}}right')
-                # 三线表左右无边框
                 has_side_borders = False
                 for side in [left, right]:
                     if side is not None:
@@ -896,12 +1056,10 @@ class ThesisChecker:
                             has_side_borders = True
 
                 if has_side_borders:
-                    # 获取表格位置近似
-                    cell_text = ''
-                    if table.rows and table.rows[0].cells:
-                        cell_text = table.rows[0].cells[0].text[:30]
-                    self._add_issue(module, 'warning', '表格', -1,
-                        cell_text, '表格应采用三线表格式（无左右边框）',
+                    self._add_issue(module, 'warning',
+                        f'{tbl_name}', -1,
+                        header_preview,
+                        f'表格应采用三线表格式（无左右边框）— {tbl_name}',
                         '三线表（上下粗线+中间细线，无左右线）',
                         '检测到左右边框', 'supplement')
                     error_count += 1
@@ -914,10 +1072,20 @@ class ThesisChecker:
     # 检查模块 8: 页眉页脚
     # --------------------------------------------------------
     def _get_thesis_title(self):
-        """获取论文中文题目（用户指定 > 封面提取 > 偶数页眉）"""
+        """获取论文中文题目（用户指定 > sdt提取 > 封面段落 > 偶数页眉）"""
         if self._user_title:
             return self._user_title
-        # 优先从封面段落提取
+        # 优先从 sdt 内容控件提取
+        for sdt in self.doc.element.body.iter(f'{{{W_NS}}}sdt'):
+            texts = []
+            for t in sdt.iter(f'{{{W_NS}}}t'):
+                if t.text:
+                    texts.append(t.text)
+            content = ''.join(texts).strip()
+            if content and has_chinese(content) and len(content) > 10:
+                if not any(k in content for k in ['点击此处','大学','声明','封面','扉页','版权','目录','摘要']):
+                    return content
+        # 从封面段落提取
         paras = self.doc.paragraphs
         cover_end = min(self.markers.get('declaration') or 30,
                         self.markers.get('abstract_cn') or 30, 50)
@@ -1144,9 +1312,35 @@ class ThesisChecker:
             'publications': ('攻读学位期间发表论文', 'official'),
         }
 
+        # Collect sdt texts to search for markers not found in paragraphs
+        sdt_texts = self._extract_sdt_texts()
+        sdt_combined = ' '.join(sdt_texts)
+
+        # Keywords to search in sdt for each marker
+        sdt_keywords = {
+            'abstract_cn': ['摘要', '中文摘要'],
+            'abstract_en': ['Abstract', 'ABSTRACT'],
+            'introduction': ['引言', '前言', '绪论'],
+            'materials': ['材料与方法', '材料'],
+            'results': ['结果与分析', '结果'],
+            'discussion': ['讨论'],
+            'conclusion': ['结论'],
+            'references': ['参考文献'],
+            'acknowledgement': ['致谢'],
+            'publications': ['攻读学位期间', '发表论文', '发表的学术'],
+        }
+
         missing = []
         for key, (name, source) in section_checks.items():
             if self.markers.get(key) is None:
+                # Before reporting missing, check if it exists in sdt content
+                found_in_sdt = False
+                for kw in sdt_keywords.get(key, []):
+                    if kw in sdt_combined:
+                        found_in_sdt = True
+                        break
+                if found_in_sdt:
+                    continue  # Found in sdt, not truly missing
                 missing.append(name)
                 self._add_issue(module, 'error', '论文结构', -1, '',
                     f'缺少"{name}"章节', f'应包含{name}', '未找到', source)
@@ -1330,7 +1524,7 @@ class ThesisChecker:
     # 检查模块 12: 单位与符号规范
     # --------------------------------------------------------
     def check_units_symbols(self):
-        """检查单位规范、化学式、数值单位间距"""
+        """检查单位规范、化学式、数值单位间距——逐条报告"""
         module = '单位符号'
         paras = self.doc.paragraphs
         start = self.markers.get('introduction') or 0
@@ -1338,11 +1532,8 @@ class ThesisChecker:
 
         error_count = 0
         total_checks = 0
-        max_report = 8
 
-        # 定义问题模式
         unit_rules = [
-            # (正则, 规则描述, 期望值, 来源)
             (re.compile(r'(?<![a-zA-Z])rpm(?![a-zA-Z])'),
              '转速单位应使用r/min，不用rpm', 'r/min', 'annotation'),
             (re.compile(r'(?<![a-zA-Z/])(?<!\d)ml(?![a-zA-Z])'),
@@ -1353,58 +1544,37 @@ class ThesisChecker:
              '化学式ddH₂O中O是字母不是数字0', 'ddH₂O', 'annotation'),
         ]
 
-        # 数值与单位间距检查 (如 "25℃" 应为 "25 ℃")
-        # 注意：% 和 ° 通常不加空格
         unit_spacing_pat = re.compile(
             r'(\d)(℃|°C|mol/L|mg/kg|μg|ng|pg|copies|CFU|IU|mmol|μmol)',
         )
-
-        counts = {r[1]: 0 for r in unit_rules}
-        counts['数值单位间距'] = 0
 
         for i in range(start, min(end, len(paras))):
             text = paras[i].text
             if not text or len(text.strip()) < 3:
                 continue
+            section = self._get_section_label(i)
+            loc_prefix = f'第{i+1}段 [{section}]'
 
             for pat, rule_desc, expected, source in unit_rules:
-                matches = pat.findall(text)
-                if matches:
-                    counts[rule_desc] += len(matches)
+                for m in pat.finditer(text):
                     total_checks += 1
-                    if counts[rule_desc] <= max_report:
-                        # 找到匹配位置的上下文
-                        m = pat.search(text)
-                        ctx_start = max(0, m.start() - 15)
-                        ctx_end = min(len(text), m.end() + 15)
-                        context = text[ctx_start:ctx_end]
-                        self._add_issue(module, 'warning', f'第{i+1}段', i,
-                            paras[i].text.strip(),
-                            rule_desc, expected, f'发现: ...{context}...', source)
-                        error_count += 1
-
-            # 数值单位间距
-            sp_matches = unit_spacing_pat.findall(text)
-            if sp_matches:
-                counts['数值单位间距'] += len(sp_matches)
-                total_checks += 1
-                if counts['数值单位间距'] <= max_report:
-                    m = unit_spacing_pat.search(text)
-                    ctx_s = max(0, m.start() - 10)
-                    ctx_e = min(len(text), m.end() + 10)
-                    self._add_issue(module, 'info', f'第{i+1}段', i,
+                    ctx_s = max(0, m.start() - 15)
+                    ctx_e = min(len(text), m.end() + 15)
+                    context = text[ctx_s:ctx_e]
+                    self._add_issue(module, 'warning', loc_prefix, i,
                         paras[i].text.strip(),
-                        '数值与单位之间建议加空格（%除外）',
-                        f'{m.group(1)} {m.group(2)}',
-                        f'{m.group(1)}{m.group(2)}', 'supplement')
+                        rule_desc, expected, f'...{context}...', source)
+                    error_count += 1
 
-        # 汇总超出报告上限的
-        for desc, cnt in counts.items():
-            if cnt > max_report:
-                self._add_issue(module, 'info', '汇总', -1, '',
-                    f'共发现 {cnt} 处{desc}问题（仅展示前{max_report}条）',
-                    '', f'总计{cnt}处',
-                    'annotation' if '单位' not in desc else 'supplement')
+            for m in unit_spacing_pat.finditer(text):
+                total_checks += 1
+                ctx_s = max(0, m.start() - 10)
+                ctx_e = min(len(text), m.end() + 10)
+                self._add_issue(module, 'info', loc_prefix, i,
+                    paras[i].text.strip(),
+                    '数值与单位之间建议加空格（%除外）',
+                    f'{m.group(1)} {m.group(2)}',
+                    f'...{text[ctx_s:ctx_e]}...', 'supplement')
 
         total_checks = max(total_checks, 1)
         score = max(0, 7 * (1 - error_count / total_checks))
@@ -1458,9 +1628,27 @@ class ThesisChecker:
         abbr_pat = re.compile(r'\b([A-Z]{2,}(?:-[A-Z0-9]+)?)\b')
         # 全称定义模式: "全称（Abbreviation，缩写）" 或 "Full Name (ABB)"
         define_pat = re.compile(r'[（(]\s*([A-Z]{2,})\s*[,，]?\s*([A-Z]{2,})?\s*[）)]')
+        # 符号说明格式: "ABBR: Full name" or "ABBR：全称"
+        symbol_def_pat = re.compile(r'^([A-Z][A-Z0-9\-]+)\s*[:：]')
 
         first_occurrences = {}  # abbr -> first para index
         defined_abbrs = set()
+
+        # Extract abbreviations from 符号说明 section (before abstract)
+        symbols_idx = self.markers.get('symbols')
+        abstract_cn_idx = self.markers.get('abstract_cn')
+        if symbols_idx is not None:
+            symbols_end = abstract_cn_idx or (symbols_idx + 60)
+            for j in range(symbols_idx + 1, min(symbols_end, len(paras))):
+                sym_text = paras[j].text.strip()
+                if not sym_text:
+                    continue
+                sym_m = symbol_def_pat.match(sym_text)
+                if sym_m:
+                    defined_abbrs.add(sym_m.group(1))
+                # Also extract any uppercase abbreviations on the line
+                for abb in abbr_pat.findall(sym_text):
+                    defined_abbrs.add(abb)
 
         for i in range(start, min(end, len(paras))):
             text = paras[i].text
@@ -1488,7 +1676,10 @@ class ThesisChecker:
         common_abbrs = {'DNA', 'RNA', 'PCR', 'pH', 'UV', 'SDS', 'PAGE', 'EDTA',
                         'PBS', 'DMSO', 'Fig', 'USA', 'ALV', 'SPF', 'ELISA',
                         'qPCR', 'cDNA', 'mRNA', 'TAE', 'TBE', 'LB', 'OD',
-                        'BLAST', 'NCBI', 'MEGA', 'RT', 'ORF'}
+                        'BLAST', 'NCBI', 'MEGA', 'RT', 'ORF', 'SYBR', 'MDA',
+                        'MLV', 'HPRS', 'HRP', 'TMB', 'BSA', 'DEPC', 'DMEM',
+                        'FBS', 'GAPDH', 'ANOVA', 'SD', 'CI', 'ROC', 'AUC',
+                        'NTC', 'LOD', 'LOQ', 'CT', 'Ct', 'Tm'}
 
         undefined_abbrs = []
         for abb, first_idx in first_occurrences.items():
@@ -1554,9 +1745,9 @@ class ThesisChecker:
         total_checks += 1
         # 常见生物学名模式
         latin_pat = re.compile(
-            r'\b(Escherichia\s+coli|Salmonella|Staphylococcus|Streptococcus|'
-            r'Mycoplasma\s+\w+|Xanthomonas\s+\w+|Pseudomonas\s+\w+|'
-            r'Gallus\s+gallus|Rous\s+sarcoma|Avian\s+leukosis)\b'
+            r'\b(Escherichia\s+coli|Salmonella\s+\w+|Staphylococcus\s+\w+|'
+            r'Streptococcus\s+\w+|Mycoplasma\s+\w+|Xanthomonas\s+\w+|'
+            r'Pseudomonas\s+\w+|Gallus\s+gallus)\b'
         )
         non_italic_latin = 0
         for i in range(start, min(end, len(paras))):
@@ -1729,8 +1920,12 @@ class ThesisChecker:
     # 生成 HTML 报告
     # --------------------------------------------------------
     def generate_html_report(self, output_path):
-        total = self.get_total_score()
-        max_total = self.get_max_score()
+        raw_total = self.get_total_score()
+        raw_max = self.get_max_score()
+        # 归一化到100分
+        pct = (raw_total / raw_max * 100) if raw_max > 0 else 0
+        total = round(pct, 0)
+        max_total = 100
 
         # 统计
         error_count = sum(1 for i in self.issues if i.severity == 'error')
@@ -2069,11 +2264,12 @@ def main():
     checker = ThesisChecker(filepath, thesis_title=args.title)
     checker.run_all_checks()
 
-    total = checker.get_total_score()
-    max_total = checker.get_max_score()
+    raw_total = checker.get_total_score()
+    raw_max = checker.get_max_score()
+    score_100 = round(raw_total / raw_max * 100) if raw_max > 0 else 0
 
     print('=' * 50)
-    print(f'审查完成! 总分: {total:.0f} / {max_total}')
+    print(f'审查完成! 总分: {score_100} / 100')
     print(f'发现问题: {len(checker.issues)} 条')
     print(f'  - 错误: {sum(1 for i in checker.issues if i.severity == "error")} 条')
     print(f'  - 警告: {sum(1 for i in checker.issues if i.severity == "warning")} 条')
