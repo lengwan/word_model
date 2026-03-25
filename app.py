@@ -803,34 +803,30 @@ if uploaded_file is not None and _can_check:
                     if os.path.exists(pay_img):
                         st.image(pay_img, width=200, caption=f"支付宝扫码 · {tier_price}元")
                     else:
-                        st.info(f"添加微信 **l8811925** 转账 {tier_price} 元")
+                        st.info(f"请扫码支付 {tier_price} 元")
 
-                    # 自动发码：用户点"我已付款"后自动分配一个兑换码
-                    if st.button("我已付款，获取兑换码", key="paid_btn", use_container_width=True):
-                        codes = load_codes()
-                        # 查找一个该套餐下未使用的码
-                        tier_map = {"极简版": "basic", "基础版": "basic", "专业版": "pro"}
-                        available = [c for c, info in codes.items()
-                                     if not info['used'] and info.get('tier') == tier_map.get(tier_name, 'basic')]
-                        if available:
-                            auto_code = available[0]
-                            st.session_state['auto_code'] = auto_code
-                            # 不 rerun，直接在下方显示兑换码
-                        else:
-                            st.warning("兑换码暂时售罄，请联系微信 l8811925")
-
-                    st.caption("付完款点击上方按钮，即时获取兑换码")
+                    st.markdown(f"""
+                    <div style="background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);
+                        border-radius:10px;padding:16px;margin-top:12px;font-size:0.88rem;
+                        line-height:1.8;color:var(--text-secondary);">
+                        <div style="font-weight:700;color:var(--text-primary);margin-bottom:6px;">
+                            付款后 3 步获取兑换码：</div>
+                        1. 支付宝扫码付款 <b>{tier_price} 元</b><br>
+                        2. 添加微信 <b style="color:var(--accent-blue);">l8811925</b><br>
+                        3. 发送 <b>付款截图</b> + 报告编号
+                           <b style="color:var(--accent-blue);">{report_id}</b><br>
+                        <div style="margin-top:8px;font-size:0.8rem;color:var(--text-muted);">
+                            工作时间 5 分钟内回复 · 非工作时间 2 小时内回复</div>
+                    </div>""", unsafe_allow_html=True)
 
                 with col_unlock:
                     st.markdown("##### 输入兑换码解锁")
-
-                    # 如果刚自动获得码，显示出来
-                    if 'auto_code' in st.session_state:
-                        st.success(f"你的兑换码: **{st.session_state['auto_code']}**")
-                        st.caption("复制上方兑换码，粘贴到下面输入框，点击解锁")
+                    st.markdown("""
+                    <div style="font-size:0.85rem;color:var(--text-secondary);margin-bottom:12px;line-height:1.6;">
+                        收到兑换码后，粘贴到下方输入框即可解锁完整报告
+                    </div>""", unsafe_allow_html=True)
 
                     code_input = st.text_input("兑换码", placeholder="FMT-XXXX-XXXX",
-                        value=st.session_state.get('auto_code', ''),
                         label_visibility="collapsed")
                     if st.button("解锁完整报告", type="primary", use_container_width=True):
                         if code_input:
@@ -847,7 +843,7 @@ if uploaded_file is not None and _can_check:
                         else:
                             st.warning("请输入兑换码")
                     st.markdown("""
-                    <div style="font-size:0.8rem;color:#64748b;margin-top:12px;line-height:1.8;">
+                    <div style="font-size:0.8rem;color:var(--text-muted);margin-top:12px;line-height:1.8;">
                         解锁后包含：<br>
                         &nbsp;&nbsp;全部问题的详细位置和修改建议<br>
                         &nbsp;&nbsp;按严重度 / 模块 / 来源筛选<br>
