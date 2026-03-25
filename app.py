@@ -511,7 +511,7 @@ def _render_admin_panel():
 st.markdown('''
 <div class="hero">
     <h1>论文格式一键体检</h1>
-    <p>盲审不挂格式分 · 答辩不被打回改 · 60秒查出125项问题</p>
+    <p>盲审不挂格式分 · 答辩不被打回改 · 5分钟查出125项问题</p>
     <div class="highlights">
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">125项</div><div class="hl-label">深度检查</div></div>
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">13大</div><div class="hl-label">模块全覆盖</div></div>
