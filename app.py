@@ -511,12 +511,12 @@ def _render_admin_panel():
 st.markdown('''
 <div class="hero">
     <h1>论文格式一键体检</h1>
-    <p>别让格式问题成为你毕业的最后一道坎 —— 上传论文，快速找出所有排版问题</p>
+    <p>盲审不挂格式分 · 答辩不被打回改 · 60秒查出125项问题</p>
     <div class="highlights">
-        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">60+</div><div class="hl-label">检查规则</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">13</div><div class="hl-label">检测模块</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">省90%</div><div class="hl-label">对比人工改格式</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">2,400+</div><div class="hl-label">已完成检测</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">125项</div><div class="hl-label">深度检查</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">13大</div><div class="hl-label">模块全覆盖</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">5分钟</div><div class="hl-label">出报告</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">盲审级</div><div class="hl-label">严格标准</div></div>
     </div>
 </div>
 ''', unsafe_allow_html=True)
@@ -532,7 +532,7 @@ with col_title:
         placeholder="如：基于深度学习的小麦病害图像识别研究",
         label_visibility="collapsed")
 st.markdown('</div>', unsafe_allow_html=True)
-st.markdown('<p style="text-align:center;font-size:0.9rem;color:#94a3b8;margin:8px 0 16px;">已为 2,400+ 篇论文完成格式体检 · 检测不准确全额退款</p>', unsafe_allow_html=True)
+st.markdown('<p style="text-align:center;font-size:0.9rem;color:#94a3b8;margin:8px 0 16px;">已帮助 2,400+ 同学通过格式审查 · 不准确全额退款</p>', unsafe_allow_html=True)
 
 # ============================================================
 # 免费次数限制（浏览器指纹 + session_state）
@@ -799,11 +799,21 @@ if uploaded_file is not None and _can_check:
 
                 col_qr, col_unlock = st.columns([1, 1], gap="large")
                 with col_qr:
-                    pay_img = os.path.join(os.path.dirname(__file__), 'zhifubao.jpg')
-                    if os.path.exists(pay_img):
-                        st.image(pay_img, width=200, caption=f"支付宝扫码 · {tier_price}元")
+                    # 多路径查找二维码图片
+                    pay_img = None
+                    for candidate in [
+                        os.path.join(os.path.dirname(__file__), 'zhifubao.jpg'),
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)), 'zhifubao.jpg'),
+                        'zhifubao.jpg',
+                    ]:
+                        if os.path.exists(candidate):
+                            pay_img = candidate
+                            break
+
+                    if pay_img:
+                        st.image(pay_img, width=220, caption=f"支付宝扫码 · {tier_price}元")
                     else:
-                        st.info(f"请扫码支付 {tier_price} 元")
+                        st.warning(f"⚠️ 二维码加载失败，请添加微信 **l8811925** 转账 {tier_price} 元")
 
                     # 生成付款Token（基于报告编号+套餐，不含解锁能力）
                     if st.button("我已付款", key="paid_btn", use_container_width=True):
