@@ -248,12 +248,12 @@ def _locked_read_write(fn):
 
 def load_codes():
     if os.path.exists(CODES_FILE):
-        with open(CODES_FILE, 'r') as f:
+        with open(CODES_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     return {}
 
 def save_codes(codes):
-    with open(CODES_FILE, 'w') as f:
+    with open(CODES_FILE, 'w', encoding='utf-8') as f:
         json.dump(codes, f, ensure_ascii=False, indent=2)
 
 @_locked_read_write
@@ -491,281 +491,308 @@ _can_check = False
 if uploaded_file is not None:
     usage = _get_usage_count()
     unlocked_session = st.session_state.get('unlocked', False)
-    if usage >= FREE_CHECK_LIMIT and not unlocked_session:
+    in_payment_flow = 'pay_tier' in st.session_state or 'auto_code' in st.session_state
+    if usage >= FREE_CHECK_LIMIT and not unlocked_session and not in_payment_flow:
         st.warning(f"免费版已用完 {FREE_CHECK_LIMIT} 次检查机会，请购买套餐后使用兑换码解锁")
     else:
         _can_check = True
 
 if uploaded_file is not None and _can_check:
-    # 递增免费计数（仅免费用户）
-    if not st.session_state.get('unlocked', False):
-        _increment_usage()
-        components.html(_INCREMENT_JS, height=0)
+    # 用文件内容的 hash 判断是否同一份论文，避免 rerun 时重复检查
+    _file_bytes = uploaded_file.getvalue()
+    _file_hash = hashlib.md5(_file_bytes).hexdigest()
+    _cache = st.session_state.get('check_cache', {})
+    _cache_hit = (_cache.get('file_hash') == _file_hash
+                  and _cache.get('thesis_title') == (thesis_title or None))
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = tmp.name
+    if _cache_hit:
+        # 缓存命中：直接读取上次结果，不重新检查
+        data = _cache['data']
+        html_content = _cache['html_content']
+        report_id = _cache['report_id']
+    else:
+        # 首次检查或文件变化：执行检查并缓存
+        # 递增免费计数（仅免费用户，付款流程中不再递增）
+        if not st.session_state.get('unlocked', False) and 'pay_tier' not in st.session_state and 'auto_code' not in st.session_state:
+            _increment_usage()
+            components.html(_INCREMENT_JS, height=0)
 
-    html_path = None
-    try:
-        with st.spinner("正在审查论文格式..."):
-            t0 = time.time()
-            checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None)
-            checker.run_all_checks()
-            elapsed = time.time() - t0
-            data = checker.get_report_data()
-            html_path = tmp_path.replace('.docx', '_report.html')
-            checker.generate_html_report(html_path)
-            with open(html_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
+            tmp.write(_file_bytes)
+            tmp_path = tmp.name
 
-        report_id = f"FMT-{datetime.now().strftime('%Y%m%d')}-{hashlib.md5(uploaded_file.getvalue()[:1024]).hexdigest()[:6].upper()}"
+        html_path = None
+        try:
+            with st.spinner("正在审查论文格式..."):
+                t0 = time.time()
+                checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None)
+                checker.run_all_checks()
+                elapsed = time.time() - t0
+                data = checker.get_report_data()
+                html_path = tmp_path.replace('.docx', '_report.html')
+                checker.generate_html_report(html_path)
+                with open(html_path, 'r', encoding='utf-8') as f:
+                    html_content = f.read()
+        finally:
+            try:
+                os.unlink(tmp_path)
+                if html_path and os.path.exists(html_path):
+                    os.unlink(html_path)
+            except:
+                pass
 
-        st.success(f"审查完成！报告编号 {report_id}")
-        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+        report_id = f"FMT-{datetime.now().strftime('%Y%m%d')}-{hashlib.md5(_file_bytes[:1024]).hexdigest()[:6].upper()}"
 
-        # ========== 评分概览 ==========
-        col_ring, col_metrics = st.columns([1, 2])
-        with col_ring:
-            st.markdown(render_score_ring(data['total_score'], data['max_score'], data['grade']),
-                unsafe_allow_html=True)
-            # 排名机制（基于分数估算百分位）
-            pct_score = data['pct']
-            if pct_score >= 90: beat_pct = 95
-            elif pct_score >= 80: beat_pct = 80
-            elif pct_score >= 70: beat_pct = 55
-            elif pct_score >= 60: beat_pct = 35
-            elif pct_score >= 50: beat_pct = 20
-            else: beat_pct = 8
-            st.markdown(f'<p style="text-align:center;font-size:0.85rem;color:#94a3b8;margin-top:4px;">'
-                f'你的论文格式超过了 <b style="color:#f59e0b;">{beat_pct}%</b> 的论文</p>',
-                unsafe_allow_html=True)
-        with col_metrics:
-            m1, m2, m3 = st.columns(3)
-            m1.metric("严重错误", data['error_count'])
-            m2.metric("格式警告", data['warning_count'])
-            m3.metric("优化建议", data['info_count'])
-            m4, m5, m6 = st.columns(3)
-            m4.metric("段落数", data['total_paras'])
-            m5.metric("表格数", data['total_tables'])
-            m6.metric("图片数", data['total_images'])
+        # 写入缓存
+        st.session_state['check_cache'] = {
+            'file_hash': _file_hash,
+            'thesis_title': thesis_title or None,
+            'data': data,
+            'html_content': html_content,
+            'report_id': report_id,
+        }
 
-        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.success(f"审查完成！报告编号 {report_id}")
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # ========== 模块评分卡片网格 ==========
-        st.markdown("#### 各模块得分")
-        mods = data['modules']
-        # 用 HTML grid 渲染（比 st.columns 更紧凑）
-        grid_html = '<div class="mod-grid">'
-        for mod in mods:
-            grid_html += render_module_card(mod)
-        grid_html += '</div>'
-        st.markdown(grid_html, unsafe_allow_html=True)
+    # ========== 评分概览 ==========
+    col_ring, col_metrics = st.columns([1, 2])
+    with col_ring:
+        st.markdown(render_score_ring(data['total_score'], data['max_score'], data['grade']),
+            unsafe_allow_html=True)
+        # 排名机制（基于分数估算百分位）
+        pct_score = data['pct']
+        if pct_score >= 90: beat_pct = 95
+        elif pct_score >= 80: beat_pct = 80
+        elif pct_score >= 70: beat_pct = 55
+        elif pct_score >= 60: beat_pct = 35
+        elif pct_score >= 50: beat_pct = 20
+        else: beat_pct = 8
+        st.markdown(f'<p style="text-align:center;font-size:0.85rem;color:#94a3b8;margin-top:4px;">'
+            f'你的论文格式超过了 <b style="color:#f59e0b;">{beat_pct}%</b> 的论文</p>',
+            unsafe_allow_html=True)
+    with col_metrics:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("严重错误", data['error_count'])
+        m2.metric("格式警告", data['warning_count'])
+        m3.metric("优化建议", data['info_count'])
+        m4, m5, m6 = st.columns(3)
+        m4.metric("段落数", data['total_paras'])
+        m5.metric("表格数", data['total_tables'])
+        m6.metric("图片数", data['total_images'])
 
-        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # ========== 问题列表 ==========
-        issues = data['issues']
-        st.markdown(f"#### 问题详情（共 {len(issues)} 条）")
+    # ========== 模块评分卡片网格 ==========
+    st.markdown("#### 各模块得分")
+    mods = data['modules']
+    # 用 HTML grid 渲染（比 st.columns 更紧凑）
+    grid_html = '<div class="mod-grid">'
+    for mod in mods:
+        grid_html += render_module_card(mod)
+    grid_html += '</div>'
+    st.markdown(grid_html, unsafe_allow_html=True)
 
-        # 免费展示：优先挑选编号规范和正文格式的 error/warning（最抓眼球）
-        FREE_LIMIT = 2
-        priority_modules = ['编号规范', '正文格式', '标题层级', '图表规范']
-        priority_issues = [i for i in issues
-                           if i['module'] in priority_modules and i['severity'] in ('error', 'warning')]
-        other_issues = [i for i in issues if i not in priority_issues]
-        free_preview = (priority_issues + other_issues)[:FREE_LIMIT]
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        for issue in free_preview:
-            st.markdown(render_issue(issue), unsafe_allow_html=True)
+    # ========== 问题列表 ==========
+    issues = data['issues']
+    st.markdown(f"#### 问题详情（共 {len(issues)} 条）")
 
-        # ========== 付费墙 / 完整报告 ==========
-        if len(issues) > FREE_LIMIT:
-            unlocked = st.session_state.get('unlocked', False)
+    # 免费展示：优先挑选编号规范和正文格式的 error/warning（最抓眼球）
+    FREE_LIMIT = 3
+    priority_modules = ['编号规范', '正文格式', '标题层级', '图表规范']
+    priority_issues = [i for i in issues
+                       if i['module'] in priority_modules and i['severity'] in ('error', 'warning')]
+    other_issues = [i for i in issues if i not in priority_issues]
+    free_preview = (priority_issues + other_issues)[:FREE_LIMIT]
 
-            if not unlocked:
-                # 付费墙遮罩
-                st.markdown(f'''
-                <div class="paywall">
-                    <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
-                    <div style="font-size:1.2rem;font-weight:700;color:#f1f5f9;margin-bottom:6px;">
-                        还有 {len(issues)-FREE_LIMIT} 条问题待查看</div>
-                    <div style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px;">
-                        选择套餐解锁完整报告，查看全部问题的位置和修改建议</div>
+    for issue in free_preview:
+        st.markdown(render_issue(issue), unsafe_allow_html=True)
+
+    # ========== 付费墙 / 完整报告 ==========
+    if len(issues) > FREE_LIMIT:
+        unlocked = st.session_state.get('unlocked', False)
+
+        if not unlocked:
+            # 付费墙遮罩
+            st.markdown(f'''
+            <div class="paywall">
+                <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
+                <div style="font-size:1.2rem;font-weight:700;color:#f1f5f9;margin-bottom:6px;">
+                    还有 {len(issues)-FREE_LIMIT} 条问题待查看</div>
+                <div style="color:#94a3b8;font-size:0.9rem;margin-bottom:20px;">
+                    选择套餐解锁完整报告，查看全部问题的位置和修改建议</div>
+            </div>''', unsafe_allow_html=True)
+
+            st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+            # ---- 套餐选择（三档）----
+            st.markdown("#### 毕业季特惠 · 选择套餐")
+            t1, t2, t3 = st.columns(3)
+            with t1:
+                st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;">
+                    <div style="font-size:1rem;font-weight:700;">极简版</div>
+                    <div style="margin:10px 0;">
+                        <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 19.9 元</span><br>
+                        <span style="font-size:2rem;font-weight:800;color:#3b82f6;">9.9 元</span>
+                        <span style="font-size:0.7rem;background:#3b82f622;color:#3b82f6;padding:2px 6px;border-radius:4px;">毕业季半价</span>
+                    </div>
+                    <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                        60+ 项规则全量扫描<br>
+                        全部问题列表 + 位置定位<br>
+                        单次使用</div>
                 </div>''', unsafe_allow_html=True)
+                pick_lite = st.button("选择极简版", key="pick_lite", use_container_width=True)
+            with t2:
+                st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(245,158,11,0.3);">
+                    <div style="font-size:1rem;font-weight:700;">基础版</div>
+                    <div style="margin:10px 0;">
+                        <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 49.9 元</span><br>
+                        <span style="font-size:2rem;font-weight:800;color:#f59e0b;">24.9 元</span>
+                        <span style="font-size:0.7rem;background:#f59e0b22;color:#f59e0b;padding:2px 6px;border-radius:4px;">毕业季5折</span>
+                    </div>
+                    <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                        极简版全部功能<br>
+                        每条问题附修改建议<br>
+                        按严重度/模块智能筛选<br>
+                        下载完整 HTML 报告<br>
+                        含 3 次复查</div>
+                </div>''', unsafe_allow_html=True)
+                pick_basic = st.button("选择基础版", key="pick_basic", use_container_width=True)
+            with t3:
+                st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(236,72,153,0.3);">
+                    <div style="font-size:1rem;font-weight:700;">专业版 <span style="font-size:0.7rem;color:#ec4899;background:rgba(236,72,153,0.15);padding:2px 8px;border-radius:4px;">推荐</span></div>
+                    <div style="margin:10px 0;">
+                        <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 99.9 元</span><br>
+                        <span style="font-size:2rem;font-weight:800;color:#ec4899;">49.9 元</span>
+                        <span style="font-size:0.7rem;background:#ec489922;color:#ec4899;padding:2px 6px;border-radius:4px;">毕业季5折</span>
+                    </div>
+                    <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                        基础版全部功能<br>
+                        支持自定义学校专属审查模板<br>
+                        不限次复查 60 天<br>
+                        赠送 Word 排版模板<br>
+                        优先客服响应</div>
+                </div>''', unsafe_allow_html=True)
+                pick_pro = st.button("选择专业版", key="pick_pro", type="primary", use_container_width=True)
+
+            st.caption("邀请同学使用你的专属邀请码购买，双方各返 5 元")
+
+            # 选定套餐后弹出付款区（用按钮当前帧判断，不持久化到 session_state）
+            just_picked = None
+            if pick_lite: just_picked = ("极简版", "9.9")
+            elif pick_basic: just_picked = ("基础版", "24.9")
+            elif pick_pro: just_picked = ("专业版", "49.9")
+
+            if just_picked:
+                # 切换套餐时清除之前的兑换码，防止套餐和码不匹配
+                old_tier = st.session_state.get('pay_tier')
+                if old_tier and old_tier != just_picked[0]:
+                    st.session_state.pop('auto_code', None)
+                st.session_state['pay_tier'] = just_picked[0]
+                st.session_state['pay_price'] = just_picked[1]
+
+            # 只在用户选了套餐后显示付款区
+            if 'pay_tier' in st.session_state:
+                tier_name = st.session_state['pay_tier']
+                tier_price = st.session_state['pay_price']
 
                 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+                st.markdown(f"#### 付款 · {tier_name}（{tier_price}元）")
 
-                # ---- 套餐选择（三档）----
-                st.markdown("#### 毕业季特惠 · 选择套餐")
-                t1, t2, t3 = st.columns(3)
-                with t1:
-                    st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;">
-                        <div style="font-size:1rem;font-weight:700;">极简版</div>
-                        <div style="margin:10px 0;">
-                            <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 19.9 元</span><br>
-                            <span style="font-size:2rem;font-weight:800;color:#3b82f6;">9.9 元</span>
-                            <span style="font-size:0.7rem;background:#3b82f622;color:#3b82f6;padding:2px 6px;border-radius:4px;">毕业季半价</span>
-                        </div>
-                        <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
-                            60+ 项规则全量扫描<br>
-                            全部问题列表 + 位置定位<br>
-                            单次使用</div>
-                    </div>''', unsafe_allow_html=True)
-                    pick_lite = st.button("选择极简版", key="pick_lite", use_container_width=True)
-                with t2:
-                    st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(245,158,11,0.3);">
-                        <div style="font-size:1rem;font-weight:700;">基础版</div>
-                        <div style="margin:10px 0;">
-                            <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 49.9 元</span><br>
-                            <span style="font-size:2rem;font-weight:800;color:#f59e0b;">24.9 元</span>
-                            <span style="font-size:0.7rem;background:#f59e0b22;color:#f59e0b;padding:2px 6px;border-radius:4px;">毕业季5折</span>
-                        </div>
-                        <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
-                            极简版全部功能<br>
-                            每条问题附修改建议<br>
-                            按严重度/模块智能筛选<br>
-                            下载完整 HTML 报告<br>
-                            含 3 次复查</div>
-                    </div>''', unsafe_allow_html=True)
-                    pick_basic = st.button("选择基础版", key="pick_basic", use_container_width=True)
-                with t3:
-                    st.markdown('''<div class="glass-card" style="text-align:center;padding:24px 16px;border-color:rgba(236,72,153,0.3);">
-                        <div style="font-size:1rem;font-weight:700;">专业版 <span style="font-size:0.7rem;color:#ec4899;background:rgba(236,72,153,0.15);padding:2px 8px;border-radius:4px;">推荐</span></div>
-                        <div style="margin:10px 0;">
-                            <span style="font-size:0.85rem;color:#64748b;text-decoration:line-through;">原价 99.9 元</span><br>
-                            <span style="font-size:2rem;font-weight:800;color:#ec4899;">49.9 元</span>
-                            <span style="font-size:0.7rem;background:#ec489922;color:#ec4899;padding:2px 6px;border-radius:4px;">毕业季5折</span>
-                        </div>
-                        <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
-                            基础版全部功能<br>
-                            支持自定义学校专属审查模板<br>
-                            不限次复查 60 天<br>
-                            赠送 Word 排版模板<br>
-                            优先客服响应</div>
-                    </div>''', unsafe_allow_html=True)
-                    pick_pro = st.button("选择专业版", key="pick_pro", type="primary", use_container_width=True)
+                col_qr, col_unlock = st.columns([1, 1], gap="large")
+                with col_qr:
+                    pay_img = os.path.join(os.path.dirname(__file__), 'zhifubao.jpg')
+                    if os.path.exists(pay_img):
+                        st.image(pay_img, width=200, caption=f"支付宝扫码 · {tier_price}元")
+                    else:
+                        st.info(f"添加微信 **l8811925** 转账 {tier_price} 元")
 
-                st.caption("邀请同学使用你的专属邀请码购买，双方各返 5 元")
-
-                # 选定套餐后弹出付款区（用按钮当前帧判断，不持久化到 session_state）
-                just_picked = None
-                if pick_lite: just_picked = ("极简版", "9.9")
-                elif pick_basic: just_picked = ("基础版", "24.9")
-                elif pick_pro: just_picked = ("专业版", "49.9")
-
-                if just_picked:
-                    st.session_state['pay_tier'] = just_picked[0]
-                    st.session_state['pay_price'] = just_picked[1]
-
-                # 只在用户选了套餐后显示付款区
-                if 'pay_tier' in st.session_state:
-                    tier_name = st.session_state['pay_tier']
-                    tier_price = st.session_state['pay_price']
-
-                    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-                    st.markdown(f"#### 付款 · {tier_name}（{tier_price}元）")
-
-                    col_qr, col_unlock = st.columns([1, 1], gap="large")
-                    with col_qr:
-                        pay_img = os.path.join(os.path.dirname(__file__), 'zhifubao.jpg')
-                        if os.path.exists(pay_img):
-                            st.image(pay_img, width=200, caption=f"支付宝扫码 · {tier_price}元")
+                    # 自动发码：用户点"我已付款"后自动分配一个兑换码
+                    if st.button("我已付款，获取兑换码", key="paid_btn", use_container_width=True):
+                        codes = load_codes()
+                        # 查找一个该套餐下未使用的码
+                        tier_map = {"极简版": "basic", "基础版": "basic", "专业版": "pro"}
+                        available = [c for c, info in codes.items()
+                                     if not info['used'] and info.get('tier') == tier_map.get(tier_name, 'basic')]
+                        if available:
+                            auto_code = available[0]
+                            st.session_state['auto_code'] = auto_code
+                            # 不 rerun，直接在下方显示兑换码
                         else:
-                            st.info(f"添加微信 **l8811925** 转账 {tier_price} 元")
+                            st.warning("兑换码暂时售罄，请联系微信 l8811925")
 
-                        # 自动发码：用户点"我已付款"后自动分配一个兑换码
-                        if st.button("我已付款，获取兑换码", key="paid_btn", use_container_width=True):
-                            codes = load_codes()
-                            # 查找一个该套餐下未使用的码
-                            tier_map = {"极简版": "basic", "基础版": "basic", "专业版": "pro"}
-                            available = [c for c, info in codes.items()
-                                         if not info['used'] and info.get('tier') == tier_map.get(tier_name, 'basic')]
-                            if available:
-                                auto_code = available[0]
-                                st.session_state['auto_code'] = auto_code
+                    st.caption("付完款点击上方按钮，即时获取兑换码")
+
+                with col_unlock:
+                    st.markdown("##### 输入兑换码解锁")
+
+                    # 如果刚自动获得码，显示出来
+                    if 'auto_code' in st.session_state:
+                        st.success(f"你的兑换码: **{st.session_state['auto_code']}**")
+                        st.caption("复制上方兑换码，粘贴到下面输入框，点击解锁")
+
+                    code_input = st.text_input("兑换码", placeholder="FMT-XXXX-XXXX",
+                        value=st.session_state.get('auto_code', ''),
+                        label_visibility="collapsed")
+                    if st.button("解锁完整报告", type="primary", use_container_width=True):
+                        if code_input:
+                            ok, msg = verify_code(code_input,
+                                report_id=report_id, filename=uploaded_file.name)
+                            if ok:
+                                st.session_state['unlocked'] = True
+                                st.session_state.pop('pay_tier', None)
+                                st.session_state.pop('pay_price', None)
+                                st.session_state.pop('auto_code', None)
                                 st.rerun()
                             else:
-                                st.warning("兑换码暂时售罄，请联系微信 l8811925")
+                                st.error(msg)
+                        else:
+                            st.warning("请输入兑换码")
+                    st.markdown("""
+                    <div style="font-size:0.8rem;color:#64748b;margin-top:12px;line-height:1.8;">
+                        解锁后包含：<br>
+                        &nbsp;&nbsp;全部问题的详细位置和修改建议<br>
+                        &nbsp;&nbsp;按严重度 / 模块 / 来源筛选<br>
+                        &nbsp;&nbsp;下载完整 HTML 报告文件
+                    </div>""", unsafe_allow_html=True)
 
-                        st.caption("付完款点击上方按钮，即时获取兑换码")
+        else:
+            # ========== 完整报告 ==========
+            st.markdown("**已解锁完整报告**")
 
-                    with col_unlock:
-                        st.markdown("##### 输入兑换码解锁")
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                sev_f = st.selectbox("严重度", ['全部','错误','警告','建议'], key='sf')
+            with f2:
+                mod_f = st.selectbox("模块", ['全部']+[m['name'] for m in mods], key='mf')
+            with f3:
+                src_f = st.selectbox("来源", ['全部','官方规定','专业补充','批注修订'], key='rf')
 
-                        # 如果刚自动获得码，显示出来
-                        if 'auto_code' in st.session_state:
-                            st.success(f"你的兑换码: **{st.session_state['auto_code']}**")
-                            st.caption("复制上方兑换码，粘贴到下面输入框，点击解锁")
+            sev_map = {'错误':'error','警告':'warning','建议':'info'}
+            src_map = {'官方规定':'official','专业补充':'supplement','批注修订':'annotation'}
+            filtered = issues
+            if sev_f != '全部': filtered = [i for i in filtered if i['severity'] == sev_map[sev_f]]
+            if mod_f != '全部': filtered = [i for i in filtered if i['module'] == mod_f]
+            if src_f != '全部': filtered = [i for i in filtered if i['source'] == src_map[src_f]]
 
-                        code_input = st.text_input("兑换码", placeholder="FMT-XXXX-XXXX",
-                            value=st.session_state.get('auto_code', ''),
-                            label_visibility="collapsed")
-                        if st.button("解锁完整报告", type="primary", use_container_width=True):
-                            if code_input:
-                                ok, msg = verify_code(code_input,
-                                    report_id=report_id, filename=uploaded_file.name)
-                                if ok:
-                                    st.session_state['unlocked'] = True
-                                    st.session_state.pop('pay_tier', None)
-                                    st.session_state.pop('pay_price', None)
-                                    st.session_state.pop('auto_code', None)
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
-                            else:
-                                st.warning("请输入兑换码")
-                        st.markdown("""
-                        <div style="font-size:0.8rem;color:#64748b;margin-top:12px;line-height:1.8;">
-                            解锁后包含：<br>
-                            &nbsp;&nbsp;全部问题的详细位置和修改建议<br>
-                            &nbsp;&nbsp;按严重度 / 模块 / 来源筛选<br>
-                            &nbsp;&nbsp;下载完整 HTML 报告文件
-                        </div>""", unsafe_allow_html=True)
+            st.caption(f"显示 {len(filtered)} / {len(issues)} 条")
+            for issue in filtered:
+                st.markdown(render_issue(issue), unsafe_allow_html=True)
 
-            else:
-                # ========== 完整报告 ==========
-                st.markdown("**已解锁完整报告**")
+            st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+            st.download_button("下载完整 HTML 报告", data=html_content,
+                file_name=f"格式审查报告_{report_id}.html", mime="text/html",
+                type="primary", use_container_width=True)
 
-                f1, f2, f3 = st.columns(3)
-                with f1:
-                    sev_f = st.selectbox("严重度", ['全部','错误','警告','建议'], key='sf')
-                with f2:
-                    mod_f = st.selectbox("模块", ['全部']+[m['name'] for m in mods], key='mf')
-                with f3:
-                    src_f = st.selectbox("来源", ['全部','官方规定','专业补充','批注修订'], key='rf')
-
-                sev_map = {'错误':'error','警告':'warning','建议':'info'}
-                src_map = {'官方规定':'official','专业补充':'supplement','批注修订':'annotation'}
-                filtered = issues
-                if sev_f != '全部': filtered = [i for i in filtered if i['severity'] == sev_map[sev_f]]
-                if mod_f != '全部': filtered = [i for i in filtered if i['module'] == mod_f]
-                if src_f != '全部': filtered = [i for i in filtered if i['source'] == src_map[src_f]]
-
-                st.caption(f"显示 {len(filtered)} / {len(issues)} 条")
-                for issue in filtered:
-                    st.markdown(render_issue(issue), unsafe_allow_html=True)
-
-                st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-                st.download_button("下载完整 HTML 报告", data=html_content,
-                    file_name=f"格式审查报告_{report_id}.html", mime="text/html",
-                    type="primary", use_container_width=True)
-
-        # 页脚
-        st.markdown(f'''<div class="app-footer">
-            论文格式一键体检 &nbsp;|&nbsp; 报告编号 {report_id} &nbsp;|&nbsp;
-            {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-            <br>联系微信 l8811925
-        </div>''', unsafe_allow_html=True)
-        _render_admin_panel()
-
-    finally:
-        try:
-            os.unlink(tmp_path)
-            if html_path and os.path.exists(html_path):
-                os.unlink(html_path)
-        except:
-            pass
+    # 页脚
+    st.markdown(f'''<div class="app-footer">
+        论文格式一键体检 &nbsp;|&nbsp; 报告编号 {report_id} &nbsp;|&nbsp;
+        {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        <br>联系微信 l8811925
+    </div>''', unsafe_allow_html=True)
+    _render_admin_panel()
 
 else:
     # ========== 未上传 - 介绍页 ==========
