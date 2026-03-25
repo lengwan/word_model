@@ -1,0 +1,106 @@
+{
+  "FMT-VSJF-7GA0": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-8RM2-GGM8": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-WSWL-FU9V": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-WJLO-PN33": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-RKGV-NR0J": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-PUII-1T99": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-O1TY-YZ6R": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-EE2A-8DKM": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-J71Q-VUHJ": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-WXCR-JU52": {
+    "tier": "basic",
+    "used": false,
+    "created": "2026-03-22T15:11:23.112458"
+  },
+  "FMT-G8GX-0OV0": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-AR7T-YK8U": {
+    "tier": "pro",
+    "used": true,
+    "created": "2026-03-22T15:11:33.644739",
+    "used_at": "2026-03-22T22:26:03.467193",
+    "session": "10702414",
+    "report_id": "FMT-20260322-2C0EF0",
+    "filename": "付华雨-研究生毕业论文2 (1).docx"
+  },
+  "FMT-Q66N-HZBQ": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-JQEX-BGLY": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-NM2B-D4FI": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-IZMG-V3Q3": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-MZO3-F07D": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-FD3R-A90W": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-BLYG-UQ1V": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  },
+  "FMT-1X3G-U5L2": {
+    "tier": "pro",
+    "used": false,
+    "created": "2026-03-22T15:11:33.644739"
+  }
+}
