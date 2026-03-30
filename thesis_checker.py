@@ -10,6 +10,7 @@ import sys
 import os
 import re
 import math
+import copy
 from dataclasses import dataclass, field
 from typing import Optional
 from docx import Document
@@ -59,6 +60,94 @@ REQUIRED_SECTIONS = [
     '引言', '材料与方法', '结果与分析', '讨论', '结论',
     '参考文献', '致谢', '攻读学位期间发表论文'
 ]
+
+# ============================================================
+# 默认格式规则（山东农业大学硕士论文）
+# ============================================================
+DEFAULT_RULES = {
+    "school_name": "山东农业大学",
+    "degree": "硕士",
+    "page": {
+        "size": "A4",
+        "margin_top_cm": 2.5,
+        "margin_bottom_cm": 2.5,
+        "margin_left_cm": 2.5,
+        "margin_right_cm": 2.5,
+    },
+    "body": {
+        "cn_font": "宋体",
+        "en_font": "Times New Roman",
+        "font_size": "小四",
+        "line_spacing": 1.5,
+        "first_indent_char": 2,
+    },
+    "headings": {
+        "h1": {"font": "黑体", "size": "三号", "bold": True},
+        "h2": {"font": "黑体", "size": "四号", "bold": True},
+        "h3": {"font": "黑体", "size": "小四", "bold": True},
+        "numbering": "numeric",
+    },
+    "abstract": {
+        "title_cn_font": "黑体",
+        "title_cn_size": "三号",
+        "title_en_font": "Times New Roman",
+        "title_en_size": "三号",
+        "word_count_min": 600,
+        "word_count_max": 1500,
+        "keyword_count_min": 3,
+        "keyword_count_max": 5,
+    },
+    "toc": {
+        "title_font": "黑体",
+        "title_size": "三号",
+    },
+    "caption": {
+        "font": "宋体",
+        "size": "小五",
+        "bilingual": True,
+    },
+    "header": {
+        "odd_page": "山东农业大学硕士学位论文",
+        "even_page": "auto",
+        "odd_even_different": True,
+    },
+    "references": {
+        "min_count": 100,
+        "foreign_ratio": 0.33,
+        "cn_before_en": True,
+    },
+    "cover_fields": ["分类号", "UDC", "学科专业", "指导教师", "论文作者", "培养单位"],
+}
+
+# ============================================================
+# 字体别名映射 & 工具函数
+# ============================================================
+FONT_ALIAS = {
+    '宋体': SIMSUNG_NAMES,
+    '黑体': SIMHEI_NAMES,
+    '楷体': KAITI_NAMES,
+    'Times New Roman': TNR_NAMES,
+}
+
+
+def _font_match(actual_font, expected_font_name):
+    """判断实际字体是否匹配期望字体名"""
+    aliases = FONT_ALIAS.get(expected_font_name, {expected_font_name})
+    return actual_font in aliases
+
+
+def merge_rules(custom_rules=None):
+    """合并自定义规则和默认规则，custom 覆盖 default，缺失项用默认值"""
+    if not custom_rules:
+        return copy.deepcopy(DEFAULT_RULES)
+    merged = copy.deepcopy(DEFAULT_RULES)
+    for key, val in custom_rules.items():
+        if isinstance(val, dict) and key in merged and isinstance(merged[key], dict):
+            merged[key].update({k: v for k, v in val.items() if v is not None})
+        elif val is not None:
+            merged[key] = val
+    return merged
+
 
 # ============================================================
 # 数据类
@@ -255,13 +344,14 @@ def get_heading_level(para):
 # ============================================================
 
 class ThesisChecker:
-    def __init__(self, filepath, thesis_title=None):
+    def __init__(self, filepath, thesis_title=None, rules=None):
         self.filepath = filepath
         self.filename = os.path.basename(filepath)
         self.doc = Document(filepath)
         self.issues: list[Issue] = []
         self.scores = {}  # module -> (earned, total)
         self._user_title = thesis_title  # 用户指定的论文题目（优先级最高）
+        self.rules = merge_rules(rules)
 
         # 预处理：识别文档结构
         self._identify_sections()
@@ -367,6 +457,12 @@ class ThesisChecker:
         module = '页面设置'
         error_count = 0
         total_checks = 0
+        r = self.rules
+
+        target_margin_top = Cm(r['page']['margin_top_cm'])
+        target_margin_bottom = Cm(r['page']['margin_bottom_cm'])
+        target_margin_left = Cm(r['page']['margin_left_cm'])
+        target_margin_right = Cm(r['page']['margin_right_cm'])
 
         for idx, section in enumerate(self.doc.sections):
             sec_label = f'节{idx+1}'
@@ -382,16 +478,16 @@ class ThesisChecker:
 
             # 页边距
             margins = {
-                '上边距': section.top_margin,
-                '下边距': section.bottom_margin,
-                '左边距': section.left_margin,
-                '右边距': section.right_margin,
+                '上边距': (section.top_margin, target_margin_top, r['page']['margin_top_cm']),
+                '下边距': (section.bottom_margin, target_margin_bottom, r['page']['margin_bottom_cm']),
+                '左边距': (section.left_margin, target_margin_left, r['page']['margin_left_cm']),
+                '右边距': (section.right_margin, target_margin_right, r['page']['margin_right_cm']),
             }
-            for name, val in margins.items():
+            for name, (val, target, target_cm) in margins.items():
                 total_checks += 1
-                if val is not None and abs(val - TARGET_MARGIN) > MARGIN_TOLERANCE:
+                if val is not None and abs(val - target) > MARGIN_TOLERANCE:
                     self._add_issue(module, 'error', f'{sec_label} {name}', -1, '',
-                        f'{name}须为2.5cm', '2.5cm',
+                        f'{name}须为{target_cm}cm', f'{target_cm}cm',
                         f'{val/360000:.2f}cm', 'official')
                     error_count += 1
 
@@ -433,6 +529,7 @@ class ThesisChecker:
         module = '封面'
         error_count = 0
         total_checks = 0
+        r = self.rules
 
         # 从三个来源收集封面信息
         sdt_texts = self._extract_sdt_texts()
@@ -472,7 +569,8 @@ class ThesisChecker:
             error_count += 0.5
 
         # ---- 检查必填字段 ----
-        field_checks = {
+        # 从规则中构建字段检查映射
+        _cover_field_keywords = {
             '分类号': ['分类号'],
             'UDC': ['UDC'],
             '学科专业': ['专业', '学科', 'Major'],
@@ -480,6 +578,12 @@ class ThesisChecker:
             '论文作者': ['论文作者', '研究生', 'Candidate'],
             '培养单位': ['培养单位', '学院', 'College'],
         }
+        field_checks = {}
+        for field_name in r['cover_fields']:
+            if field_name in _cover_field_keywords:
+                field_checks[field_name] = _cover_field_keywords[field_name]
+            else:
+                field_checks[field_name] = [field_name]
 
         for field_name, keywords in field_checks.items():
             total_checks += 1
@@ -526,10 +630,14 @@ class ThesisChecker:
         error_count = 0
         total_checks = 8
         paras = self.doc.paragraphs
+        r = self.rules
 
         # 中文摘要
         cn_idx = self.markers.get('abstract_cn')
         en_idx = self.markers.get('abstract_en')
+
+        exp_cn_title_size = FONT_SIZE_MAP[r['abstract']['title_cn_size']]
+        exp_en_title_size = FONT_SIZE_MAP[r['abstract']['title_en_size']]
 
         if cn_idx is not None:
             # 检查标题格式
@@ -544,20 +652,22 @@ class ThesisChecker:
                     '非居中', 'official')
                 error_count += 1
 
-            # 标题字号：三号黑体
+            # 标题字号
             for run in title_para.runs:
                 if run.text.strip():
                     size_pt = get_effective_font_size(run, title_para)
-                    if size_pt and abs(size_pt - 16) > 1:
+                    if size_pt and abs(size_pt - exp_cn_title_size) > 1:
                         self._add_issue(module, 'error', f'第{cn_idx+1}段(中文摘要标题)', cn_idx,
-                            title_text, '中文摘要标题须为三号', '三号(16pt)',
+                            title_text, f'中文摘要标题须为{r["abstract"]["title_cn_size"]}',
+                            f'{r["abstract"]["title_cn_size"]}({exp_cn_title_size}pt)',
                             pt_to_name(size_pt), 'official')
                         error_count += 1
 
                     ea_font = get_east_asian_font(run)
-                    if ea_font and ea_font not in SIMHEI_NAMES:
+                    if ea_font and not _font_match(ea_font, r['abstract']['title_cn_font']):
                         self._add_issue(module, 'error', f'第{cn_idx+1}段(中文摘要标题)', cn_idx,
-                            title_text, '中文摘要标题须为黑体', '黑体',
+                            title_text, f'中文摘要标题须为{r["abstract"]["title_cn_font"]}',
+                            r['abstract']['title_cn_font'],
                             ea_font, 'official')
                         error_count += 1
                     break
@@ -591,9 +701,12 @@ class ThesisChecker:
                         # 检查关键词数量
                         kws = re.split(r'[；;]', kw_content)
                         kws = [k.strip() for k in kws if k.strip()]
-                        if len(kws) < 3 or len(kws) > 5:
+                        kw_min = r['abstract']['keyword_count_min']
+                        kw_max = r['abstract']['keyword_count_max']
+                        if len(kws) < kw_min or len(kws) > kw_max:
                             self._add_issue(module, 'warning', f'第{j+1}段(关键词)', j,
-                                text, '关键词数量应为3-5个', '3-5个',
+                                text, f'关键词数量应为{kw_min}-{kw_max}个',
+                                f'{kw_min}-{kw_max}个',
                                 f'{len(kws)}个', 'official')
                             error_count += 0.5
                     break
@@ -624,16 +737,17 @@ class ThesisChecker:
             for run in title_para.runs:
                 if run.text.strip():
                     size_pt = get_effective_font_size(run, title_para)
-                    if size_pt and abs(size_pt - 16) > 1:
+                    if size_pt and abs(size_pt - exp_en_title_size) > 1:
                         self._add_issue(module, 'error', f'第{en_idx+1}段(Abstract标题)', en_idx,
-                            title_text, 'Abstract标题须为三号', '三号(16pt)',
+                            title_text, f'Abstract标题须为{r["abstract"]["title_en_size"]}',
+                            f'{r["abstract"]["title_en_size"]}({exp_en_title_size}pt)',
                             pt_to_name(size_pt), 'official')
                         error_count += 1
                     font_name = run.font.name
-                    if font_name and font_name not in TNR_NAMES:
+                    if font_name and not _font_match(font_name, r['abstract']['title_en_font']):
                         self._add_issue(module, 'error', f'第{en_idx+1}段(Abstract标题)', en_idx,
-                            title_text, 'Abstract标题须为Times New Roman',
-                            'Times New Roman', font_name, 'official')
+                            title_text, f'Abstract标题须为{r["abstract"]["title_en_font"]}',
+                            r['abstract']['title_en_font'], font_name, 'official')
                         error_count += 1
                     break
 
@@ -673,6 +787,9 @@ class ThesisChecker:
         error_count = 0
         total_checks = 3
         paras = self.doc.paragraphs
+        r = self.rules
+
+        exp_toc_title_size = FONT_SIZE_MAP[r['toc']['title_size']]
 
         toc_idx = self.markers.get('toc')
         if toc_idx is None:
@@ -683,8 +800,7 @@ class ThesisChecker:
             has_toc_field = bool(self.doc.element.body.findall(
                 f'.//{{{W_NS}}}fldSimple[@{{{W_NS}}}instr]'))
             if has_toc_in_sdt or has_toc_field:
-                # 目录存在但通过 Word 域/sdt 生成，无法精确检查格式
-                self.scores[module] = (6, 8)  # 给大部分分
+                self.scores[module] = (6, 8)
                 return
             self._add_issue(module, 'error', '全文', -1, '',
                 '未找到目录', '应包含目录', '未找到', 'official')
@@ -693,7 +809,7 @@ class ThesisChecker:
 
         title_para = paras[toc_idx]
 
-        # 标题格式：三号黑体居中
+        # 标题格式：居中
         align = get_effective_alignment(title_para)
         if align != WD_ALIGN_PARAGRAPH.CENTER:
             self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
@@ -704,16 +820,18 @@ class ThesisChecker:
         for run in title_para.runs:
             if run.text.strip():
                 size_pt = get_effective_font_size(run, title_para)
-                if size_pt and abs(size_pt - 16) > 1:
+                if size_pt and abs(size_pt - exp_toc_title_size) > 1:
                     self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
-                        title_para.text, '目录标题须为三号', '三号(16pt)',
+                        title_para.text, f'目录标题须为{r["toc"]["title_size"]}',
+                        f'{r["toc"]["title_size"]}({exp_toc_title_size}pt)',
                         pt_to_name(size_pt), 'supplement')
                     error_count += 1
 
                 ea_font = get_east_asian_font(run)
-                if ea_font and ea_font not in SIMHEI_NAMES:
+                if ea_font and not _font_match(ea_font, r['toc']['title_font']):
                     self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
-                        title_para.text, '目录标题须为黑体', '黑体',
+                        title_para.text, f'目录标题须为{r["toc"]["title_font"]}',
+                        r['toc']['title_font'],
                         ea_font, 'supplement')
                     error_count += 1
                 break
@@ -728,6 +846,14 @@ class ThesisChecker:
         """检查正文段落字体、字号、行距、首行缩进"""
         module = '正文格式'
         paras = self.doc.paragraphs
+        r = self.rules
+
+        exp_body_size = FONT_SIZE_MAP[r['body']['font_size']]
+        exp_line_spacing = r['body']['line_spacing']
+        exp_indent_char = r['body']['first_indent_char']
+        # 缩进范围：基于字符数计算（每字符约0.37-0.42cm），留一定容差
+        indent_min = exp_indent_char * 0.25
+        indent_max = exp_indent_char * 0.6
 
         # 确定正文范围 — only start from introduction (not abstract)
         start = self.markers.get('introduction')
@@ -769,21 +895,22 @@ class ThesisChecker:
 
             # 检查行距
             line_sp = get_effective_line_spacing(para)
-            if line_sp is not None and abs(line_sp - 1.5) > 0.1:
+            if line_sp is not None and abs(line_sp - exp_line_spacing) > 0.1:
                 spacing_errors += 1
                 if spacing_errors <= max_report_per_type:
                     self._add_issue(module, 'error', loc, i, text,
-                        '正文行距须为1.5倍', '1.5倍行距',
+                        f'正文行距须为{exp_line_spacing}倍', f'{exp_line_spacing}倍行距',
                         f'{line_sp:.2f}倍', 'official')
 
             # 检查首行缩进
             indent_cm = get_effective_first_indent(para)
             if indent_cm is not None:
-                if indent_cm < 0.5 or indent_cm > 1.2:
+                if indent_cm < indent_min or indent_cm > indent_max:
                     indent_errors += 1
                     if indent_errors <= max_report_per_type:
                         self._add_issue(module, 'warning', loc, i, text,
-                            '正文须首行缩进2字符', '缩进2字符(约0.74-0.85cm)',
+                            f'正文须首行缩进{exp_indent_char}字符',
+                            f'缩进{exp_indent_char}字符(约0.74-0.85cm)',
                             f'{indent_cm:.2f}cm', 'supplement')
             elif indent_cm is None and checked_count <= 3:
                 # 前几段如果没有缩进信息，给个提醒
@@ -797,32 +924,35 @@ class ThesisChecker:
 
                 # 字号检查
                 size_pt = get_effective_font_size(run, para)
-                if size_pt and abs(size_pt - 12) > 0.6:
+                if size_pt and abs(size_pt - exp_body_size) > 0.6:
                     size_errors += 1
                     if size_errors <= max_report_per_type:
                         self._add_issue(module, 'error', loc, i, text,
-                            '正文字号须为小四号', '小四(12pt)',
+                            f'正文字号须为{r["body"]["font_size"]}号',
+                            f'{r["body"]["font_size"]}({exp_body_size}pt)',
                             pt_to_name(size_pt), 'official')
                     break
 
                 # 中文字体检查
                 if has_chinese(run_text):
                     ea_font = get_east_asian_font(run)
-                    if ea_font and ea_font not in SIMSUNG_NAMES:
+                    if ea_font and not _font_match(ea_font, r['body']['cn_font']):
                         font_errors += 1
                         if font_errors <= max_report_per_type:
                             self._add_issue(module, 'warning', loc, i, text,
-                                '正文中文须用宋体', '宋体',
+                                f'正文中文须用{r["body"]["cn_font"]}', r['body']['cn_font'],
                                 ea_font, 'official')
                         break
                 else:
                     font_name = run.font.name
-                    if font_name and font_name not in TNR_NAMES and font_name not in SIMSUNG_NAMES:
+                    en_font_aliases = FONT_ALIAS.get(r['body']['en_font'], {r['body']['en_font']})
+                    cn_font_aliases = FONT_ALIAS.get(r['body']['cn_font'], {r['body']['cn_font']})
+                    if font_name and font_name not in en_font_aliases and font_name not in cn_font_aliases:
                         font_errors += 1
                         if font_errors <= max_report_per_type:
                             self._add_issue(module, 'warning', loc, i, text,
-                                '正文英文须用Times New Roman',
-                                'Times New Roman', font_name, 'official')
+                                f'正文英文须用{r["body"]["en_font"]}',
+                                r['body']['en_font'], font_name, 'official')
                         break
 
         total_errors = font_errors + size_errors + spacing_errors + indent_errors
@@ -849,16 +979,18 @@ class ThesisChecker:
         paras = self.doc.paragraphs
         start = self.markers.get('introduction') or 0
         end = self.markers.get('references') or len(paras)
+        r = self.rules
 
         error_count = 0
         total_headings = 0
 
-        # 期望值
-        expected = {
-            1: ('三号', 16, SIMHEI_NAMES),
-            2: ('四号', 14, SIMHEI_NAMES),
-            3: ('小四号', 12, SIMHEI_NAMES),
-        }
+        # 期望值（从规则读取）
+        expected = {}
+        for lvl, key in [(1, 'h1'), (2, 'h2'), (3, 'h3')]:
+            h = r['headings'][key]
+            exp_size = FONT_SIZE_MAP[h['size']]
+            exp_fonts = FONT_ALIAS.get(h['font'], {h['font']})
+            expected[lvl] = (h['size'], exp_size, exp_fonts, h['font'])
 
         for i in range(start, min(end, len(paras))):
             para = paras[i]
@@ -868,7 +1000,7 @@ class ThesisChecker:
 
             total_headings += 1
             text = para.text.strip()
-            exp_name, exp_pt, exp_fonts = expected[level]
+            exp_name, exp_pt, exp_fonts, exp_font_name = expected[level]
 
             for run in para.runs:
                 if not run.text.strip():
@@ -882,11 +1014,11 @@ class ThesisChecker:
                         f'{exp_name}({exp_pt}pt)', pt_to_name(size_pt), 'official')
                     error_count += 1
 
-                # 字体检查（应为黑体）
+                # 字体检查
                 ea_font = get_east_asian_font(run)
                 if ea_font and ea_font not in exp_fonts:
                     self._add_issue(module, 'error', f'第{i+1}段({level}级标题)', i,
-                        text, f'{level}级标题须为黑体', '黑体',
+                        text, f'{level}级标题须为{exp_font_name}', exp_font_name,
                         ea_font, 'official')
                     error_count += 1
 
@@ -912,9 +1044,9 @@ class ThesisChecker:
 
     def _check_caption_format(self, module, para, para_idx, text, caption_type, total_checks):
         """检查图题/表题的字号、字体，逐条报告"""
-        # 图题和表题均为小五号(9pt)宋体
-        EXPECTED_SIZE = 9.0
-        EXPECTED_NAME = '小五(9pt)'
+        r = self.rules
+        EXPECTED_SIZE = FONT_SIZE_MAP[r['caption']['size']]
+        EXPECTED_NAME = f'{r["caption"]["size"]}({EXPECTED_SIZE}pt)'
 
         section = self._get_section_label(para_idx)
         loc = f'第{para_idx+1}段 [{section}]({caption_type})'
@@ -931,9 +1063,10 @@ class ThesisChecker:
             # 中文字体
             if has_chinese(run.text):
                 ea_font = get_east_asian_font(run)
-                if ea_font and ea_font not in SIMSUNG_NAMES:
+                if ea_font and not _font_match(ea_font, r['caption']['font']):
                     self._add_issue(module, 'warning', loc, para_idx,
-                        text, f'{caption_type}中文应为宋体', '宋体', ea_font, 'supplement')
+                        text, f'{caption_type}中文应为{r["caption"]["font"]}',
+                        r['caption']['font'], ea_font, 'supplement')
             break
 
     def check_figures_tables(self):
@@ -1126,13 +1259,14 @@ class ThesisChecker:
         module = '页眉页脚'
         error_count = 0
         total_checks = 0
+        r = self.rules
 
-        ODD_HEADER_EXPECTED = '山东农业大学硕士学位论文'
+        ODD_HEADER_EXPECTED = r['header']['odd_page']
         thesis_title = self._get_thesis_title()
         even_odd_enabled = self._is_even_odd_headers_enabled()
 
         # 如果未开启奇偶页不同，先报告这个问题
-        if not even_odd_enabled:
+        if not even_odd_enabled and r['header']['odd_even_different']:
             total_checks += 1
             self._add_issue(module, 'error', '文档设置', -1, '',
                 '未开启"奇偶页不同页眉"（规范要求奇数页为学校名、偶数页为论文题目）',
@@ -1160,7 +1294,7 @@ class ThesisChecker:
                 elif default_text != ODD_HEADER_EXPECTED:
                     self._add_issue(module, 'warning', f'节{idx+1} {header_label}', -1,
                         default_text,
-                        f'{"奇数页" if even_odd_enabled else ""}页眉应为"山东农业大学硕士学位论文"',
+                        f'{"奇数页" if even_odd_enabled else ""}页眉内容不符合规范，请核对学校要求',
                         ODD_HEADER_EXPECTED, default_text, 'official')
                     error_count += 0.5
 
@@ -1212,6 +1346,7 @@ class ThesisChecker:
         error_count = 0
         total_checks = 4
         paras = self.doc.paragraphs
+        r = self.rules
 
         ref_start = self.markers.get('references')
         if ref_start is None:
@@ -1253,18 +1388,21 @@ class ThesisChecker:
 
         # 检查数量
         total_refs = len(ref_entries)
-        if total_refs < 100:
+        ref_min = r['references']['min_count']
+        if total_refs < ref_min:
             self._add_issue(module, 'error', '参考文献', ref_start, '',
-                '硕士论文参考文献应不少于100篇', '≥100篇',
+                f'硕士论文参考文献应不少于{ref_min}篇', f'≥{ref_min}篇',
                 f'{total_refs}篇', 'official')
             error_count += 1
 
         # 检查外文比例
+        foreign_ratio = r['references']['foreign_ratio']
         if total_refs > 0:
             en_ratio = len(en_refs) / total_refs
-            if en_ratio < 0.33:
+            if en_ratio < foreign_ratio:
                 self._add_issue(module, 'warning', '参考文献', ref_start, '',
-                    '外文文献应占1/3以上', f'≥{total_refs//3}篇外文',
+                    f'外文文献应占{foreign_ratio:.0%}以上',
+                    f'≥{int(total_refs * foreign_ratio)}篇外文',
                     f'{len(en_refs)}篇外文({en_ratio:.0%})', 'official')
                 error_count += 0.5
 
@@ -1276,7 +1414,7 @@ class ThesisChecker:
             error_count += 1
 
         # 检查排序：中文在前英文在后
-        if cn_refs and en_refs:
+        if r['references']['cn_before_en'] and cn_refs and en_refs:
             last_cn = max(cn_refs)
             first_en = min(en_refs)
             if first_en < last_cn:
@@ -1589,6 +1727,7 @@ class ThesisChecker:
         paras = self.doc.paragraphs
         error_count = 0
         total_checks = 0
+        r = self.rules
 
         start = self.markers.get('introduction') or 0
         end = self.markers.get('references') or len(paras)
@@ -1609,13 +1748,15 @@ class ThesisChecker:
                     cn_abstract_text += text
 
             cn_char_count = len(re.findall(r'[\u4e00-\u9fff]', cn_abstract_text))
-            if cn_char_count < 600:
+            abs_min = r['abstract']['word_count_min']
+            abs_max = r['abstract']['word_count_max']
+            if cn_char_count < abs_min:
                 self._add_issue(module, 'warning', '中文摘要', cn_idx,
                     f'摘要共{cn_char_count}字',
                     '硕士论文中文摘要约1000字', '约1000字',
                     f'{cn_char_count}字（偏少）', 'official')
                 error_count += 0.5
-            elif cn_char_count > 1500:
+            elif cn_char_count > abs_max:
                 self._add_issue(module, 'warning', '中文摘要', cn_idx,
                     f'摘要共{cn_char_count}字',
                     '硕士论文中文摘要约1000字', '约1000字',
@@ -2215,7 +2356,7 @@ h2 {{ font-size: 1.3rem; font-weight: 600; margin: 32px 0 16px; color: var(--tex
 </div>
 
 <div style="text-align:center;color:var(--text3);font-size:0.75rem;margin-top:32px;padding:16px">
-    山东农业大学硕士毕业论文格式审查工具 v1.0 &nbsp;|&nbsp; 审查标准基于学校官方规范 + 专业排版通用细则
+    论文格式一键体检 v1.0 &nbsp;|&nbsp; 审查标准基于学校官方规范 + 专业排版通用细则
 </div>
 
 <script>
@@ -2246,7 +2387,7 @@ function filterBy(field, value) {{
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='山东农业大学硕士毕业论文格式审查工具')
+    parser = argparse.ArgumentParser(description='硕士毕业论文格式审查工具')
     parser.add_argument('filepath', help='论文 .docx 文件路径')
     parser.add_argument('--title', '-t', help='指定论文中文题目（用于偶数页页眉校验）', default=None)
     args = parser.parse_args()
