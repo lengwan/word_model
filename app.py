@@ -8,10 +8,11 @@ import os
 import json
 import hashlib
 import time
+import copy
 import string
 import random
 from datetime import datetime
-from thesis_checker import ThesisChecker
+from thesis_checker import ThesisChecker, DEFAULT_RULES, merge_rules
 
 # ============================================================
 # 页面配置
@@ -475,6 +476,140 @@ def render_module_card(mod):
     </div>'''
 
 # ============================================================
+# 规则展示 / 编辑面板
+# ============================================================
+RULE_GROUPS = [
+    ("📄 页面设置", "page", [
+        ("纸张大小", "size", "text"),
+        ("上边距 (cm)", "margin_top_cm", "number"),
+        ("下边距 (cm)", "margin_bottom_cm", "number"),
+        ("左边距 (cm)", "margin_left_cm", "number"),
+        ("右边距 (cm)", "margin_right_cm", "number"),
+    ]),
+    ("📝 正文格式", "body", [
+        ("中文字体", "cn_font", "font"),
+        ("英文字体", "en_font", "font"),
+        ("字号", "font_size", "size"),
+        ("行距 (倍)", "line_spacing", "number"),
+        ("首行缩进 (字符)", "first_indent_char", "number"),
+    ]),
+    ("📑 一级标题", "headings.h1", [
+        ("字体", "font", "font"),
+        ("字号", "size", "size"),
+        ("加粗", "bold", "bool"),
+    ]),
+    ("📑 二级标题", "headings.h2", [
+        ("字体", "font", "font"),
+        ("字号", "size", "size"),
+        ("加粗", "bold", "bool"),
+    ]),
+    ("📑 三级标题", "headings.h3", [
+        ("字体", "font", "font"),
+        ("字号", "size", "size"),
+        ("加粗", "bold", "bool"),
+    ]),
+    ("📋 摘要要求", "abstract", [
+        ("中文标题字体", "title_cn_font", "font"),
+        ("中文标题字号", "title_cn_size", "size"),
+        ("英文标题字体", "title_en_font", "font"),
+        ("英文标题字号", "title_en_size", "size"),
+        ("字数下限", "word_count_min", "int"),
+        ("字数上限", "word_count_max", "int"),
+        ("关键词最少", "keyword_count_min", "int"),
+        ("关键词最多", "keyword_count_max", "int"),
+    ]),
+    ("📊 图表题注", "caption", [
+        ("字体", "font", "font"),
+        ("字号", "size", "size"),
+        ("中英双语", "bilingual", "bool"),
+    ]),
+    ("📌 页眉", "header", [
+        ("奇数页内容", "odd_page", "text"),
+        ("偶数页内容", "even_page", "text"),
+        ("奇偶页不同", "odd_even_different", "bool"),
+    ]),
+    ("📖 参考文献", "references", [
+        ("最少篇数", "min_count", "int"),
+        ("外文比例", "foreign_ratio", "number"),
+        ("中文在前", "cn_before_en", "bool"),
+    ]),
+]
+
+FONT_OPTIONS = ["宋体", "黑体", "楷体", "Times New Roman", "Arial"]
+SIZE_OPTIONS = [
+    "初号", "小初", "一号", "小一", "二号", "小二", "三号", "小三",
+    "四号", "小四", "五号", "小五", "六号",
+]
+
+
+def _get_nested(d, dotted_key):
+    """从 dict 中按 'headings.h1' 格式取值"""
+    keys = dotted_key.split('.')
+    for k in keys:
+        d = d.get(k, {})
+    return d
+
+
+def _set_nested(d, dotted_key, field_key, value):
+    """向 dict 中按 'headings.h1' 格式写值"""
+    keys = dotted_key.split('.')
+    ref = d
+    for k in keys:
+        ref = ref.setdefault(k, {})
+    ref[field_key] = value
+
+
+def _render_rules_panel(rules, editable=False):
+    """渲染规则面板
+    editable=False: 只读展示（基础版）
+    editable=True: 可编辑（专业版/定制版）
+    返回: 编辑后的 rules dict（editable=True 时）
+    """
+    edited = copy.deepcopy(rules) if editable else None
+
+    for group_label, group_key, fields in RULE_GROUPS:
+        with st.expander(group_label, expanded=False):
+            group_data = _get_nested(rules, group_key)
+            cols = st.columns(2)
+            for i, (label, field_key, field_type) in enumerate(fields):
+                val = group_data.get(field_key, '')
+                with cols[i % 2]:
+                    if not editable:
+                        st.text_input(label, value=str(val), disabled=True,
+                                      key=f"rule_{group_key}_{field_key}")
+                    else:
+                        if field_type == "font":
+                            new_val = st.selectbox(
+                                label, FONT_OPTIONS,
+                                index=FONT_OPTIONS.index(val) if val in FONT_OPTIONS else 0,
+                                key=f"edit_{group_key}_{field_key}")
+                        elif field_type == "size":
+                            new_val = st.selectbox(
+                                label, SIZE_OPTIONS,
+                                index=SIZE_OPTIONS.index(val) if val in SIZE_OPTIONS else 0,
+                                key=f"edit_{group_key}_{field_key}")
+                        elif field_type == "bool":
+                            new_val = st.checkbox(label, value=bool(val),
+                                                  key=f"edit_{group_key}_{field_key}")
+                        elif field_type == "int":
+                            new_val = st.number_input(
+                                label, value=int(val) if val else 0,
+                                step=1, key=f"edit_{group_key}_{field_key}")
+                        elif field_type == "number":
+                            new_val = st.number_input(
+                                label, value=float(val) if val else 0.0,
+                                step=0.1, format="%.2f",
+                                key=f"edit_{group_key}_{field_key}")
+                        else:
+                            new_val = st.text_input(label, value=str(val),
+                                                    key=f"edit_{group_key}_{field_key}")
+                        if edited is not None:
+                            _set_nested(edited, group_key, field_key, new_val)
+
+    return edited
+
+
+# ============================================================
 # 侧边栏（精简，仅管理员）
 # ============================================================
 # 管理员后台（放在页面最底部，折叠隐藏，普通用户看不到）
@@ -488,7 +623,7 @@ def _render_admin_panel():
             with col_a:
                 gen_n = st.number_input("生成数量", min_value=1, max_value=100, value=10)
             with col_b:
-                gen_tier = st.selectbox("套餐", ['basic', 'pro'])
+                gen_tier = st.selectbox("套餐", ['lite', 'basic', 'pro', 'custom'])
             if st.button("生成兑换码", use_container_width=True):
                 new_codes = generate_codes(gen_n, gen_tier)
                 st.code('\n'.join(new_codes))
@@ -533,6 +668,23 @@ with col_title:
         label_visibility="collapsed")
 st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('<p style="text-align:center;font-size:0.9rem;color:#94a3b8;margin:8px 0 16px;">已帮助 2,400+ 同学通过格式审查 · 不准确全额退款</p>', unsafe_allow_html=True)
+
+# ---- 定制版：格式规范上传入口 ----
+with st.expander("📎 上传学校格式规范（定制版专属）", expanded=False):
+    st.caption("支持 PDF、图片，AI 自动识别格式要求")
+    template_file = st.file_uploader(
+        "选择格式规范文件",
+        type=['pdf', 'png', 'jpg', 'jpeg'],
+        key="template_upload")
+    if template_file:
+        with st.spinner("AI 正在解析格式规范..."):
+            from template_parser import parse_template
+            try:
+                parsed_rules = parse_template(template_file.getvalue(), template_file.name)
+                st.session_state['custom_rules'] = parsed_rules
+                st.success(f"✅ 已识别 {parsed_rules.get('school_name', '未知')} 的格式规则")
+            except Exception as e:
+                st.error(f"解析失败: {e}")
 
 # ============================================================
 # 免费次数限制（浏览器指纹 + session_state）
@@ -621,7 +773,8 @@ if uploaded_file is not None and _can_check:
         try:
             with st.spinner("正在审查论文格式..."):
                 t0 = time.time()
-                checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None)
+                checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None,
+                                       rules=st.session_state.get('custom_rules'))
                 checker.run_all_checks()
                 elapsed = time.time() - t0
                 data = checker.get_report_data()
@@ -751,6 +904,7 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         极简版全部功能<br>
                         每条问题附修改建议<br>
+                        <b>查看全部 60+ 条检查规则</b><br>
                         按严重度/模块智能筛选<br>
                         下载完整 HTML 报告<br>
                         含 3 次复查</div>
@@ -766,12 +920,33 @@ if uploaded_file is not None and _can_check:
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         基础版全部功能<br>
-                        支持自定义学校专属审查模板<br>
+                        <b>自定义编辑全部检查规则</b><br>
+                        <b>适配任意学校格式要求</b><br>
                         不限次复查 60 天<br>
                         赠送 Word 排版模板<br>
                         优先客服响应</div>
                 </div>''', unsafe_allow_html=True)
                 pick_pro = st.button("选择专业版", key="pick_pro", type="primary", use_container_width=True)
+
+            # ---- 定制版卡片 ----
+            st.markdown('''
+            <div style="max-width:360px;margin:16px auto;">
+                <div class="glass-card tier-pro" style="text-align:center;padding:24px 16px;border-color:rgba(234,179,8,0.6);">
+                    <div style="font-size:1rem;font-weight:700;">定制版</div>
+                    <div style="margin:10px 0;">
+                        <span class="original-price">原价 159.9 元</span><br>
+                        <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
+                        <span class="discount-badge">毕业季5折</span>
+                    </div>
+                    <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                        专业版全部功能<br>
+                        <b>AI 扫描学校规范自动生成规则</b><br>
+                        <b>支持 PDF/图片格式规范</b><br>
+                        生成后可手动微调<br>
+                        不限次复查 60 天</div>
+                </div>
+            </div>''', unsafe_allow_html=True)
+            pick_custom = st.button("选择定制版", key="pick_custom", use_container_width=True)
 
             st.caption("邀请同学使用你的专属邀请码购买，双方各返 5 元")
 
@@ -780,6 +955,7 @@ if uploaded_file is not None and _can_check:
             if pick_lite: just_picked = ("极简版", "9.9")
             elif pick_basic: just_picked = ("基础版", "24.9")
             elif pick_pro: just_picked = ("专业版", "49.9")
+            elif pick_custom: just_picked = ("定制版", "79.9")
 
             if just_picked:
                 # 切换套餐时清除之前的兑换码，防止套餐和码不匹配
@@ -875,6 +1051,25 @@ if uploaded_file is not None and _can_check:
             # ========== 完整报告 ==========
             st.markdown("**已解锁完整报告**")
 
+            # ---- 规则面板（根据套餐类型展示）----
+            current_rules = st.session_state.get('custom_rules') or DEFAULT_RULES
+            # 从兑换码获取套餐类型
+            tier = st.session_state.get('user_tier', 'basic')
+            if tier in ('basic',):
+                st.markdown("---")
+                st.markdown("#### 本次使用的检查规则")
+                _render_rules_panel(current_rules, editable=False)
+            elif tier in ('pro', 'custom'):
+                st.markdown("---")
+                st.markdown("#### 检查规则（可编辑）")
+                st.caption("修改规则后点击「重新检查」，将按新规则重新评估")
+                edited_rules = _render_rules_panel(current_rules, editable=True)
+                if st.button("按修改后的规则重新检查", type="primary"):
+                    st.session_state['custom_rules'] = edited_rules
+                    # 清除缓存以触发重新检查
+                    st.session_state.pop('check_cache', None)
+                    st.rerun()
+
             f1, f2, f3 = st.columns(3)
             with f1:
                 sev_f = st.selectbox("严重度", ['全部','错误','警告','建议'], key='sf')
@@ -964,10 +1159,28 @@ else:
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 基础版全部功能<br>
-                支持自定义学校专属审查模板<br>
+                <b>自定义编辑全部检查规则</b><br>
+                <b>适配任意学校格式要求</b><br>
                 不限次复查 60 天（改到毕业）<br>
                 赠送 Word 排版模板 (.dotx)<br>
                 优先客服响应
+            </div>
+        </div>
+    </div>
+    <div style="max-width:360px;margin:16px auto;">
+        <div class="glass-card tier-pro" style="text-align:center;padding:24px 16px;border-color:rgba(234,179,8,0.6);">
+            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">定制版</div>
+            <div style="margin:12px 0;">
+                <span class="original-price">原价 159.9 元</span><br>
+                <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
+            </div>
+            <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
+                专业版全部功能<br>
+                <b>AI 扫描学校规范自动生成规则</b><br>
+                <b>支持 PDF/图片格式规范</b><br>
+                生成后可手动微调<br>
+                不限次复查 60 天
             </div>
         </div>
     </div>
