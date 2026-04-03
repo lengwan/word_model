@@ -442,6 +442,15 @@ class ThesisChecker:
         self.markers = markers
         self.total_paras = n
 
+        # 预计算每个段落所属的章节标签（避免 O(n²) 反复向前扫描）
+        self._section_labels = ['封面/前置页'] * n
+        current_label = '封面/前置页'
+        for i in range(n):
+            level = get_heading_level(paras[i])
+            if level == 1:
+                current_label = paras[i].text.strip()[:20]
+            self._section_labels[i] = current_label
+
     def _add_issue(self, module, severity, location, para_index, text_preview,
                    rule, expected, actual, source):
         self.issues.append(Issue(
@@ -1040,14 +1049,9 @@ class ThesisChecker:
     # 检查模块 7: 图表规范
     # --------------------------------------------------------
     def _get_section_label(self, para_idx):
-        """根据段落索引返回所在章节标签，如 '第2章 材料与方法'"""
-        # 向前搜索最近的一级标题
-        paras = self.doc.paragraphs
-        for j in range(para_idx, -1, -1):
-            level = get_heading_level(paras[j])
-            if level == 1:
-                title = paras[j].text.strip()[:20]
-                return title
+        """根据段落索引返回所在章节标签（O(1) 查表）"""
+        if 0 <= para_idx < len(self._section_labels):
+            return self._section_labels[para_idx]
         return '封面/前置页'
 
     def _check_caption_format(self, module, para, para_idx, text, caption_type, total_checks):
@@ -1948,34 +1952,33 @@ class ThesisChecker:
     # --------------------------------------------------------
     # 执行所有检查
     # --------------------------------------------------------
-    def run_all_checks(self):
-        """运行全部检查模块"""
-        print('  [ 1/13] 检查页面设置...')
-        self.check_page_setup()
-        print('  [ 2/13] 检查封面...')
-        self.check_cover()
-        print('  [ 3/13] 检查摘要...')
-        self.check_abstract()
-        print('  [ 4/13] 检查目录...')
-        self.check_toc()
-        print('  [ 5/13] 检查正文格式...')
-        self.check_body_text()
-        print('  [ 6/13] 检查标题层级...')
-        self.check_headings()
-        print('  [ 7/13] 检查图表规范...')
-        self.check_figures_tables()
-        print('  [ 8/13] 检查页眉页脚...')
-        self.check_headers_footers()
-        print('  [ 9/13] 检查参考文献...')
-        self.check_references()
-        print('  [10/13] 检查结构完整性...')
-        self.check_structure()
-        print('  [11/13] 检查编号规范...')
-        self.check_numbering()
-        print('  [12/13] 检查单位符号...')
-        self.check_units_symbols()
-        print('  [13/13] 检查内容规范...')
-        self.check_content()
+    def run_all_checks(self, progress_callback=None):
+        """运行全部检查模块
+        progress_callback: 可选回调函数 fn(step, total, module_name)
+        """
+        checks = [
+            ('页面设置', self.check_page_setup),
+            ('封面', self.check_cover),
+            ('摘要', self.check_abstract),
+            ('目录', self.check_toc),
+            ('正文格式', self.check_body_text),
+            ('标题层级', self.check_headings),
+            ('图表规范', self.check_figures_tables),
+            ('页眉页脚', self.check_headers_footers),
+            ('参考文献', self.check_references),
+            ('结构完整', self.check_structure),
+            ('编号规范', self.check_numbering),
+            ('单位符号', self.check_units_symbols),
+            ('内容规范', self.check_content),
+        ]
+        total = len(checks)
+        for i, (name, fn) in enumerate(checks):
+            if progress_callback:
+                progress_callback(i, total, name)
+            print(f'  [{i+1:2d}/{total}] 检查{name}...')
+            fn()
+        if progress_callback:
+            progress_callback(total, total, '完成')
 
     def get_total_score(self):
         return sum(s[0] for s in self.scores.values())
