@@ -749,12 +749,15 @@ def _persist_usage_to_local_storage(count):
 # 检查流程
 # ============================================================
 _can_check = False
+_skip_increment = False  # 免费次数已用完时跳过计数递增，但仍允许检查（付费墙会拦截）
 if uploaded_file is not None:
     usage = _get_usage_count()
     unlocked_session = st.session_state.get('unlocked', False)
     in_payment_flow = 'pay_tier' in st.session_state or 'auto_code' in st.session_state
     if usage >= FREE_CHECK_LIMIT and not unlocked_session and not in_payment_flow:
-        st.warning(f"免费版已用完 {FREE_CHECK_LIMIT} 次检查机会，请购买套餐后使用兑换码解锁")
+        # 免费次数用完：仍然运行检查，让用户看到预览和付费墙，但不再递增计数
+        _can_check = True
+        _skip_increment = True
     elif unlocked_session:
         # 付费用户：检查复查次数是否超限
         tc = _get_tier_config()
@@ -785,7 +788,7 @@ if uploaded_file is not None and _can_check:
         report_id = _cache['report_id']
     else:
         # 首次检查或文件变化：执行检查并缓存
-        if not st.session_state.get('unlocked', False) and 'pay_tier' not in st.session_state and 'auto_code' not in st.session_state:
+        if not _skip_increment and not st.session_state.get('unlocked', False) and 'pay_tier' not in st.session_state and 'auto_code' not in st.session_state:
             # 免费用户：递增免费计数
             _increment_usage()
         elif st.session_state.get('unlocked', False):
@@ -799,17 +802,31 @@ if uploaded_file is not None and _can_check:
 
         html_path = None
         try:
-            with st.spinner("正在审查论文格式..."):
-                t0 = time.time()
-                checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None,
-                                       rules=st.session_state.get('custom_rules'))
-                checker.run_all_checks()
-                elapsed = time.time() - t0
-                data = checker.get_report_data()
-                html_path = tmp_path.replace('.docx', '_report.html')
-                checker.generate_html_report(html_path)
-                with open(html_path, 'r', encoding='utf-8') as f:
-                    html_content = f.read()
+            progress_bar = st.progress(0, text="正在解析论文文档...")
+            status_text = st.empty()
+            t0 = time.time()
+            checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None,
+                                   rules=st.session_state.get('custom_rules'))
+            progress_bar.progress(5, text="文档解析完成，开始格式审查...")
+
+            def _on_progress(step, total, name):
+                pct = int(5 + 85 * step / total)
+                if step < total:
+                    progress_bar.progress(pct, text=f"正在检查：{name}（{step+1}/{total}）")
+                else:
+                    progress_bar.progress(95, text="正在生成报告...")
+
+            checker.run_all_checks(progress_callback=_on_progress)
+            elapsed = time.time() - t0
+            data = checker.get_report_data()
+            html_path = tmp_path.replace('.docx', '_report.html')
+            checker.generate_html_report(html_path)
+            with open(html_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            progress_bar.progress(100, text=f"审查完成！耗时 {elapsed:.1f} 秒")
+            time.sleep(0.5)
+            progress_bar.empty()
+            status_text.empty()
         finally:
             try:
                 os.unlink(tmp_path)
