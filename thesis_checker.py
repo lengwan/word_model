@@ -11,6 +11,7 @@ import os
 import re
 import math
 import copy
+import html as html_mod
 from dataclasses import dataclass, field
 from typing import Optional
 from docx import Document
@@ -498,8 +499,10 @@ class ThesisChecker:
     # --------------------------------------------------------
     # 检查模块 2: 封面
     # --------------------------------------------------------
-    def _extract_sdt_texts(self):
-        """从内容控件(sdt)中提取所有文本，返回列表"""
+    def _extract_sdt_texts(self, include_placeholders=False):
+        """从内容控件(sdt)中提取所有文本，返回列表
+        include_placeholders=True 时保留占位符文本（用于占位符检查）
+        """
         results = []
         for sdt in self.doc.element.body.iter(f'{{{W_NS}}}sdt'):
             texts = []
@@ -507,7 +510,11 @@ class ThesisChecker:
                 if t.text:
                     texts.append(t.text)
             content = ''.join(texts).strip()
-            if content and '点击此处' not in content and '编辑时请删除' not in content:
+            if not content:
+                continue
+            if include_placeholders:
+                results.append(content)
+            elif '点击此处' not in content and '编辑时请删除' not in content:
                 results.append(content)
         return results
 
@@ -608,8 +615,9 @@ class ThesisChecker:
         # ---- 检查封面是否有填写占位符未替换 ----
         total_checks += 1
         placeholders_found = []
-        for t in sdt_texts:
-            if '点击此处' in t or '填写' in t:
+        sdt_all_texts = self._extract_sdt_texts(include_placeholders=True)
+        for t in sdt_all_texts:
+            if '点击此处' in t or '填写' in t or '编辑时请删除' in t:
                 placeholders_found.append(t[:30])
         if placeholders_found:
             self._add_issue(module, 'warning', '封面', -1, '',
@@ -1355,13 +1363,12 @@ class ThesisChecker:
             self.scores[module] = (0, 5)
             return
 
-        # 确定参考文献结束位置
+        # 确定参考文献结束位置（取所有后续章节中最近的）
         ref_end = len(paras)
         for key in ['appendix', 'acknowledgement', 'publications']:
             idx = self.markers.get(key)
             if idx and idx > ref_start:
                 ref_end = min(ref_end, idx)
-                break
 
         # 收集参考文献条目
         ref_entries = []
@@ -2136,16 +2143,17 @@ class ThesisChecker:
             src_class = {'official': 'src-official', 'supplement': 'src-supplement',
                          'annotation': 'src-annotation'}.get(issue.source, 'src-supplement')
 
+            _e = html_mod.escape
             issue_rows += f'''
-            <tr class="issue-row {sev_class}-row" data-module="{issue.module}" data-severity="{issue.severity}" data-source="{issue.source}">
-                <td><span class="badge {sev_class}">{issue.severity_label}</span></td>
-                <td><span class="badge badge-module">{issue.module}</span></td>
-                <td class="location-cell">{issue.location}</td>
-                <td class="preview-cell" title="{issue.text_preview}">{issue.text_preview}</td>
-                <td>{issue.rule}</td>
-                <td class="expect-cell">{issue.expected}</td>
-                <td class="actual-cell">{issue.actual}</td>
-                <td><span class="badge {src_class}">{issue.source_label}</span></td>
+            <tr class="issue-row {sev_class}-row" data-module="{_e(issue.module)}" data-severity="{_e(issue.severity)}" data-source="{_e(issue.source)}">
+                <td><span class="badge {sev_class}">{_e(issue.severity_label)}</span></td>
+                <td><span class="badge badge-module">{_e(issue.module)}</span></td>
+                <td class="location-cell">{_e(issue.location)}</td>
+                <td class="preview-cell" title="{_e(issue.text_preview)}">{_e(issue.text_preview)}</td>
+                <td>{_e(issue.rule)}</td>
+                <td class="expect-cell">{_e(issue.expected)}</td>
+                <td class="actual-cell">{_e(issue.actual)}</td>
+                <td><span class="badge {src_class}">{_e(issue.source_label)}</span></td>
             </tr>'''
 
         html = f'''<!DOCTYPE html>
@@ -2286,7 +2294,7 @@ h2 {{ font-size: 1.3rem; font-weight: 600; margin: 32px 0 16px; color: var(--tex
 
 <h1>硕士毕业论文格式审查报告</h1>
 <div class="subtitle">
-    文件：{self.filename} &nbsp;|&nbsp; 段落数：{self.total_paras} &nbsp;|&nbsp;
+    文件：{html_mod.escape(self.filename)} &nbsp;|&nbsp; 段落数：{self.total_paras} &nbsp;|&nbsp;
     表格数：{len(self.doc.tables)} &nbsp;|&nbsp; 图片数：{len(self.doc.inline_shapes)}
 </div>
 
