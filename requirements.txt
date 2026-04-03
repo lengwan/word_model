@@ -2,3 +2,4 @@ streamlit>=1.30
 python-docx>=1.0
 lxml
 pdf2image
+streamlit-js-eval>=0.1.7
