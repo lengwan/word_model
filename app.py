@@ -11,6 +11,7 @@ import time
 import copy
 import string
 import random
+import html as html_mod
 from datetime import datetime
 from thesis_checker import ThesisChecker, DEFAULT_RULES, merge_rules
 
@@ -295,6 +296,21 @@ button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"] {
 """, unsafe_allow_html=True)
 
 # ============================================================
+# 套餐权限配置
+# ============================================================
+TIER_CONFIG = {
+    'lite':   {'recheck_limit': 0,  'rules_view': False, 'rules_edit': False, 'ai_parse': False},
+    'basic':  {'recheck_limit': 3,  'rules_view': True,  'rules_edit': False, 'ai_parse': False},
+    'pro':    {'recheck_limit': -1, 'rules_view': True,  'rules_edit': True,  'ai_parse': False},
+    'custom': {'recheck_limit': -1, 'rules_view': True,  'rules_edit': True,  'ai_parse': True},
+}
+
+def _get_tier_config():
+    """获取当前用户的套餐权限配置"""
+    tier = st.session_state.get('user_tier', 'basic')
+    return TIER_CONFIG.get(tier, TIER_CONFIG['basic'])
+
+# ============================================================
 # 兑换码管理（文件锁 + 会话绑定）
 # ============================================================
 CODES_FILE = os.path.join(os.path.dirname(__file__), 'codes.json')
@@ -331,7 +347,7 @@ def _locked_read_write(fn):
                         lock_fd.close()
                 except (OSError, IOError):
                     time.sleep(0.1)
-            return fn(*args, **kwargs)  # 超时兜底
+            raise OSError("无法获取文件锁，请稍后重试")
         else:
             # Linux/Mac: fcntl 文件锁
             lock_fd = open(LOCK_FILE, 'w')
@@ -371,6 +387,11 @@ def verify_code(code, report_id=None, filename=None):
         save_codes(codes)
         return True, '解锁成功'
     return False, '兑换码无效'
+
+@_locked_read_write
+def load_codes_safe():
+    """带文件锁的读取，用于管理员面板等需要一致性的场景"""
+    return load_codes()
 
 @_locked_read_write
 def generate_codes(n=20, tier='basic'):
@@ -416,24 +437,25 @@ def render_score_ring(score, max_score, grade):
 # 渲染问题卡片（复用）
 # ============================================================
 def render_issue(issue):
+    _e = html_mod.escape
     sev_c = {'error':'#f87171','warning':'#fbbf24','info':'#60a5fa'}
     src_c = {'official':'#a78bfa','supplement':'#2dd4bf','annotation':'#fb923c'}
     bc = sev_c.get(issue['severity'],'#64748b')
     sc = src_c.get(issue['source'],'#2dd4bf')
     preview = ''
     if issue.get('text_preview') and issue['text_preview'] != '(空)':
-        preview = f'<div style="font-size:0.75rem;color:#64748b;margin-top:4px;">{issue["text_preview"]}</div>'
+        preview = f'<div style="font-size:0.75rem;color:#64748b;margin-top:4px;">{_e(issue["text_preview"])}</div>'
     return f'''<div class="issue-card" style="border-left:3px solid {bc};">
       <div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
-        <span style="background:{bc}22;color:{bc};padding:2px 10px;border-radius:4px;font-size:0.75rem;font-weight:600;">{issue['severity_label']}</span>
-        <span style="background:#33415522;color:#94a3b8;padding:2px 10px;border-radius:4px;font-size:0.75rem;">{issue['module']}</span>
-        <span style="background:{sc}22;color:{sc};padding:2px 10px;border-radius:4px;font-size:0.75rem;font-weight:600;">{issue['source_label']}</span>
-        <span style="color:#64748b;font-size:0.75rem;font-family:monospace;">{issue['location']}</span>
+        <span style="background:{bc}22;color:{bc};padding:2px 10px;border-radius:4px;font-size:0.75rem;font-weight:600;">{_e(issue['severity_label'])}</span>
+        <span style="background:#33415522;color:#94a3b8;padding:2px 10px;border-radius:4px;font-size:0.75rem;">{_e(issue['module'])}</span>
+        <span style="background:{sc}22;color:{sc};padding:2px 10px;border-radius:4px;font-size:0.75rem;font-weight:600;">{_e(issue['source_label'])}</span>
+        <span style="color:#64748b;font-size:0.75rem;font-family:monospace;">{_e(issue['location'])}</span>
       </div>
-      <div style="font-size:0.9rem;color:#e2e8f0;margin-bottom:4px;">{issue['rule']}</div>
+      <div style="font-size:0.9rem;color:#e2e8f0;margin-bottom:4px;">{_e(issue['rule'])}</div>
       <div style="font-size:0.8rem;">
-        <span style="color:#10b981;">期望: {issue['expected']}</span> &nbsp;→&nbsp;
-        <span style="color:#ef4444;">实际: {issue['actual']}</span>
+        <span style="color:#10b981;">期望: {_e(issue['expected'])}</span> &nbsp;→&nbsp;
+        <span style="color:#ef4444;">实际: {_e(issue['actual'])}</span>
       </div>{preview}
     </div>'''
 
@@ -627,7 +649,7 @@ def _render_admin_panel():
             if st.button("生成兑换码", use_container_width=True):
                 new_codes = generate_codes(gen_n, gen_tier)
                 st.code('\n'.join(new_codes))
-            codes = load_codes()
+            codes = load_codes_safe()
             unused = sum(1 for c in codes.values() if not c['used'])
             used = sum(1 for c in codes.values() if c['used'])
             c1, c2 = st.columns(2)
@@ -669,7 +691,7 @@ with col_title:
 st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('<p style="text-align:center;font-size:0.9rem;color:#94a3b8;margin:8px 0 16px;">已帮助 2,400+ 同学通过格式审查 · 不准确全额退款</p>', unsafe_allow_html=True)
 
-# ---- 定制版：格式规范上传入口 ----
+# ---- 定制版：格式规范上传入口（策略B：所有人可见，解析时拦截）----
 with st.expander("📎 上传学校格式规范（定制版专属）", expanded=False):
     st.caption("支持 PDF、图片，AI 自动识别格式要求")
     template_file = st.file_uploader(
@@ -677,14 +699,17 @@ with st.expander("📎 上传学校格式规范（定制版专属）", expanded=
         type=['pdf', 'png', 'jpg', 'jpeg'],
         key="template_upload")
     if template_file:
-        with st.spinner("AI 正在解析格式规范..."):
-            from template_parser import parse_template
-            try:
-                parsed_rules = parse_template(template_file.getvalue(), template_file.name)
-                st.session_state['custom_rules'] = parsed_rules
-                st.success(f"✅ 已识别 {parsed_rules.get('school_name', '未知')} 的格式规则")
-            except Exception as e:
-                st.error(f"解析失败: {e}")
+        if not _get_tier_config()['ai_parse']:
+            st.warning("🔒 AI 解析格式规范为定制版专属功能，请购买定制版套餐后使用")
+        else:
+            with st.spinner("AI 正在解析格式规范..."):
+                from template_parser import parse_template
+                try:
+                    parsed_rules = parse_template(template_file.getvalue(), template_file.name)
+                    st.session_state['custom_rules'] = parsed_rules
+                    st.success(f"✅ 已识别 {parsed_rules.get('school_name', '未知')} 的格式规则")
+                except Exception as e:
+                    st.error(f"解析失败: {e}")
 
 # ============================================================
 # 免费次数限制（浏览器指纹 + session_state）
@@ -692,45 +717,33 @@ with st.expander("📎 上传学校格式规范（定制版专属）", expanded=
 FREE_CHECK_LIMIT = 2  # 免费版最多检查 2 次
 
 def _get_usage_count():
-    """获取当前会话的免费使用次数"""
+    """获取免费使用次数（优先从 localStorage 同步）"""
+    _sync_usage_from_local_storage()
     return st.session_state.get('free_usage', 0)
 
 def _increment_usage():
-    st.session_state['free_usage'] = st.session_state.get('free_usage', 0) + 1
+    new_count = st.session_state.get('free_usage', 0) + 1
+    st.session_state['free_usage'] = new_count
+    _persist_usage_to_local_storage(new_count)
 
-# 注入 JS：用 localStorage 跨会话持久化计数
-# 页面加载时读取 localStorage，写入隐藏的 query param
-import streamlit.components.v1 as components
+# 跨刷新持久计数：用 streamlit-js-eval 读写 localStorage
+from streamlit_js_eval import streamlit_js_eval
 
-_COUNTER_JS = """
-<script>
-(function(){
-    var key = 'fmt_free_count';
-    var count = parseInt(localStorage.getItem(key) || '0');
-    // 把计数写入 iframe 的 title，供 Streamlit 读取
-    document.title = count.toString();
+def _sync_usage_from_local_storage():
+    """从 localStorage 读取免费使用次数，同步到 session_state"""
+    if 'usage_synced' not in st.session_state:
+        stored = streamlit_js_eval(
+            js_expressions="parseInt(localStorage.getItem('fmt_free_count') || '0')",
+            key="read_usage")
+        if stored is not None:
+            st.session_state['free_usage'] = int(stored)
+        st.session_state['usage_synced'] = True
 
-    // 监听来自 Streamlit 的递增指令
-    window.addEventListener('message', function(e){
-        if(e.data && e.data.type === 'fmt_increment'){
-            count = parseInt(localStorage.getItem(key) || '0') + 1;
-            localStorage.setItem(key, count.toString());
-        }
-    });
-})();
-</script>
-"""
-
-# 在检查时递增 localStorage 计数
-_INCREMENT_JS = """
-<script>
-(function(){
-    var key = 'fmt_free_count';
-    var count = parseInt(localStorage.getItem(key) || '0') + 1;
-    localStorage.setItem(key, count.toString());
-})();
-</script>
-"""
+def _persist_usage_to_local_storage(count):
+    """将使用次数写入 localStorage"""
+    streamlit_js_eval(
+        js_expressions=f"localStorage.setItem('fmt_free_count', '{count}')",
+        key=f"write_usage_{count}")
 
 # ============================================================
 # 检查流程
@@ -742,6 +755,15 @@ if uploaded_file is not None:
     in_payment_flow = 'pay_tier' in st.session_state or 'auto_code' in st.session_state
     if usage >= FREE_CHECK_LIMIT and not unlocked_session and not in_payment_flow:
         st.warning(f"免费版已用完 {FREE_CHECK_LIMIT} 次检查机会，请购买套餐后使用兑换码解锁")
+    elif unlocked_session:
+        # 付费用户：检查复查次数是否超限
+        tc = _get_tier_config()
+        recheck_count = st.session_state.get('recheck_count', 0)
+        recheck_limit = tc['recheck_limit']
+        if recheck_limit != -1 and recheck_count > recheck_limit:
+            st.warning(f"已用完 {recheck_limit} 次复查机会，升级套餐可获得更多复查次数")
+        else:
+            _can_check = True
     else:
         _can_check = True
 
@@ -749,9 +771,12 @@ if uploaded_file is not None and _can_check:
     # 用文件内容的 hash 判断是否同一份论文，避免 rerun 时重复检查
     _file_bytes = uploaded_file.getvalue()
     _file_hash = hashlib.md5(_file_bytes).hexdigest()
+    _custom_rules = st.session_state.get('custom_rules')
+    _rules_hash = hashlib.md5(json.dumps(_custom_rules, sort_keys=True, default=str).encode()).hexdigest() if _custom_rules else 'default'
     _cache = st.session_state.get('check_cache', {})
     _cache_hit = (_cache.get('file_hash') == _file_hash
-                  and _cache.get('thesis_title') == (thesis_title or None))
+                  and _cache.get('thesis_title') == (thesis_title or None)
+                  and _cache.get('rules_hash') == _rules_hash)
 
     if _cache_hit:
         # 缓存命中：直接读取上次结果，不重新检查
@@ -760,10 +785,13 @@ if uploaded_file is not None and _can_check:
         report_id = _cache['report_id']
     else:
         # 首次检查或文件变化：执行检查并缓存
-        # 递增免费计数（仅免费用户，付款流程中不再递增）
         if not st.session_state.get('unlocked', False) and 'pay_tier' not in st.session_state and 'auto_code' not in st.session_state:
+            # 免费用户：递增免费计数
             _increment_usage()
-            components.html(_INCREMENT_JS, height=0)
+        elif st.session_state.get('unlocked', False):
+            # 付费用户：递增复查计数（首次检查不算复查）
+            if st.session_state.get('check_cache'):
+                st.session_state['recheck_count'] = st.session_state.get('recheck_count', 0) + 1
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
             tmp.write(_file_bytes)
@@ -787,7 +815,7 @@ if uploaded_file is not None and _can_check:
                 os.unlink(tmp_path)
                 if html_path and os.path.exists(html_path):
                     os.unlink(html_path)
-            except:
+            except Exception:
                 pass
 
         report_id = f"FMT-{datetime.now().strftime('%Y%m%d')}-{hashlib.md5(_file_bytes[:1024]).hexdigest()[:6].upper()}"
@@ -796,6 +824,7 @@ if uploaded_file is not None and _can_check:
         st.session_state['check_cache'] = {
             'file_hash': _file_hash,
             'thesis_title': thesis_title or None,
+            'rules_hash': _rules_hash,
             'data': data,
             'html_content': html_content,
             'report_id': report_id,
@@ -890,7 +919,8 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         60+ 项规则全量扫描<br>
                         全部问题列表 + 位置定位<br>
-                        单次使用</div>
+                        按严重度/模块智能筛选<br>
+                        下载完整 HTML 报告</div>
                 </div>''', unsafe_allow_html=True)
                 pick_lite = st.button("选择极简版", key="pick_lite", use_container_width=True)
             with t2:
@@ -922,8 +952,7 @@ if uploaded_file is not None and _can_check:
                         基础版全部功能<br>
                         <b>自定义编辑全部检查规则</b><br>
                         <b>适配任意学校格式要求</b><br>
-                        不限次复查 60 天<br>
-                        赠送 Word 排版模板<br>
+                        不限次复查<br>
                         优先客服响应</div>
                 </div>''', unsafe_allow_html=True)
                 pick_pro = st.button("选择专业版", key="pick_pro", type="primary", use_container_width=True)
@@ -943,7 +972,7 @@ if uploaded_file is not None and _can_check:
                         <b>AI 扫描学校规范自动生成规则</b><br>
                         <b>支持 PDF/图片格式规范</b><br>
                         生成后可手动微调<br>
-                        不限次复查 60 天</div>
+                        不限次复查</div>
                 </div>
             </div>''', unsafe_allow_html=True)
             pick_custom = st.button("选择定制版", key="pick_custom", use_container_width=True)
@@ -1031,6 +1060,11 @@ if uploaded_file is not None and _can_check:
                                 report_id=report_id, filename=uploaded_file.name)
                             if ok:
                                 st.session_state['unlocked'] = True
+                                # 从兑换码中读取套餐类型，写入 session
+                                codes = load_codes()
+                                code_upper = code_input.strip().upper()
+                                if code_upper in codes:
+                                    st.session_state['user_tier'] = codes[code_upper].get('tier', 'basic')
                                 st.session_state.pop('pay_tier', None)
                                 st.session_state.pop('pay_price', None)
                                 st.session_state.pop('auto_code', None)
@@ -1051,24 +1085,37 @@ if uploaded_file is not None and _can_check:
             # ========== 完整报告 ==========
             st.markdown("**已解锁完整报告**")
 
-            # ---- 规则面板（根据套餐类型展示）----
+            # ---- 规则面板（根据套餐权限展示）----
             current_rules = st.session_state.get('custom_rules') or DEFAULT_RULES
-            # 从兑换码获取套餐类型
-            tier = st.session_state.get('user_tier', 'basic')
-            if tier in ('basic',):
-                st.markdown("---")
-                st.markdown("#### 本次使用的检查规则")
-                _render_rules_panel(current_rules, editable=False)
-            elif tier in ('pro', 'custom'):
+            tc = _get_tier_config()
+            if tc['rules_edit']:
                 st.markdown("---")
                 st.markdown("#### 检查规则（可编辑）")
                 st.caption("修改规则后点击「重新检查」，将按新规则重新评估")
                 edited_rules = _render_rules_panel(current_rules, editable=True)
-                if st.button("按修改后的规则重新检查", type="primary"):
-                    st.session_state['custom_rules'] = edited_rules
-                    # 清除缓存以触发重新检查
-                    st.session_state.pop('check_cache', None)
-                    st.rerun()
+                # 复查次数控制
+                recheck_count = st.session_state.get('recheck_count', 0)
+                recheck_limit = tc['recheck_limit']
+                can_recheck = (recheck_limit == -1 or recheck_count < recheck_limit)
+                if can_recheck:
+                    if st.button("按修改后的规则重新检查", type="primary"):
+                        st.session_state['recheck_count'] = recheck_count + 1
+                        st.session_state['custom_rules'] = edited_rules
+                        st.session_state.pop('check_cache', None)
+                        st.rerun()
+                else:
+                    st.button("按修改后的规则重新检查", disabled=True)
+                    st.warning(f"已用完 {recheck_limit} 次复查机会，升级套餐可获得更多复查次数")
+            elif tc['rules_view']:
+                st.markdown("---")
+                st.markdown("#### 本次使用的检查规则")
+                _render_rules_panel(current_rules, editable=False)
+                # 基础版复查：重新上传同一文件即可，但有次数限制
+                recheck_count = st.session_state.get('recheck_count', 0)
+                recheck_limit = tc['recheck_limit']
+                if recheck_limit > 0:
+                    remaining = max(0, recheck_limit - recheck_count)
+                    st.caption(f"剩余复查次数：{remaining}/{recheck_limit}")
 
             f1, f2, f3 = st.columns(3)
             with f1:
@@ -1161,8 +1208,7 @@ else:
                 基础版全部功能<br>
                 <b>自定义编辑全部检查规则</b><br>
                 <b>适配任意学校格式要求</b><br>
-                不限次复查 60 天（改到毕业）<br>
-                赠送 Word 排版模板 (.dotx)<br>
+                不限次复查<br>
                 优先客服响应
             </div>
         </div>
@@ -1180,7 +1226,7 @@ else:
                 <b>AI 扫描学校规范自动生成规则</b><br>
                 <b>支持 PDF/图片格式规范</b><br>
                 生成后可手动微调<br>
-                不限次复查 60 天
+                不限次复查
             </div>
         </div>
     </div>
