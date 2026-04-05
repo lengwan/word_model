@@ -12,6 +12,7 @@ import copy
 import string
 import random
 import html as html_mod
+import subprocess
 from datetime import datetime
 from thesis_checker import ThesisChecker, DEFAULT_RULES, merge_rules
 
@@ -154,7 +155,7 @@ html, body, [class*="css"] {
 }
 [data-testid="stFileUploaderDropzone"] small { font-size:0!important; }
 [data-testid="stFileUploaderDropzone"] small::after {
-    content:"仅支持 .docx 格式，最大 50MB"; font-size:0.75rem; color:var(--text-muted);
+    content:"支持 .doc / .docx 格式，最大 50MB"; font-size:0.75rem; color:var(--text-muted);
 }
 [data-testid="stFileUploaderDropzone"] button {
     font-size:0!important; min-height:42px; padding:0 24px!important;
@@ -682,8 +683,8 @@ st.markdown('''
 st.markdown('<div class="upload-zone">', unsafe_allow_html=True)
 col_up, col_title = st.columns([3, 2])
 with col_up:
-    uploaded_file = st.file_uploader("上传论文 (.docx)", type=['docx'],
-        help="支持 .docx 格式，最大 200MB", label_visibility="collapsed")
+    uploaded_file = st.file_uploader("上传论文 (.docx / .doc)", type=['docx', 'doc'],
+        help="支持 .docx 和 .doc 格式，最大 200MB", label_visibility="collapsed")
 with col_title:
     thesis_title = st.text_input("论文题目（可选，用于页眉校验）",
         placeholder="如：基于深度学习的小麦病害图像识别研究",
@@ -796,9 +797,25 @@ if uploaded_file is not None and _can_check:
             if st.session_state.get('check_cache'):
                 st.session_state['recheck_count'] = st.session_state.get('recheck_count', 0) + 1
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.docx') as tmp:
+        _is_doc = uploaded_file.name.lower().endswith('.doc') and not uploaded_file.name.lower().endswith('.docx')
+        _suffix = '.doc' if _is_doc else '.docx'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=_suffix) as tmp:
             tmp.write(_file_bytes)
             tmp_path = tmp.name
+
+        if _is_doc:
+            st.info("检测到 .doc 格式，正在转换为 .docx ...")
+            out_dir = os.path.dirname(tmp_path)
+            result = subprocess.run(
+                ['libreoffice', '--headless', '--convert-to', 'docx', '--outdir', out_dir, tmp_path],
+                capture_output=True, timeout=120)
+            converted_path = tmp_path.rsplit('.', 1)[0] + '.docx'
+            if result.returncode != 0 or not os.path.exists(converted_path):
+                st.error("❌ .doc 文件转换失败，请用 Word 打开后另存为 .docx 格式再上传")
+                os.unlink(tmp_path)
+                st.stop()
+            os.unlink(tmp_path)
+            tmp_path = converted_path
 
         html_path = None
         try:
@@ -930,8 +947,8 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">极简版</div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 19.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;color:#94a3b8;">9.9 元</span>
-                        <span class="discount-badge">毕业季半价</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;color:#94a3b8;">14 元</span>
+                        <span class="discount-badge">毕业季7折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         60+ 项规则全量扫描<br>
@@ -945,8 +962,8 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">基础版</div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 49.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;">24.9 元</span>
-                        <span class="discount-badge">毕业季5折</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;">35 元</span>
+                        <span class="discount-badge">毕业季7折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         极简版全部功能<br>
@@ -962,8 +979,8 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">专业版 <span class="recommend-badge">推荐</span></div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 99.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;">49.9 元</span>
-                        <span class="discount-badge">毕业季5折</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;">70 元</span>
+                        <span class="discount-badge">毕业季7折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         基础版全部功能<br>
@@ -981,8 +998,8 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">定制版</div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 159.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
-                        <span class="discount-badge">毕业季5折</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;">112 元</span>
+                        <span class="discount-badge">毕业季7折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         专业版全部功能<br>
@@ -998,10 +1015,10 @@ if uploaded_file is not None and _can_check:
 
             # 选定套餐后弹出付款区（用按钮当前帧判断，不持久化到 session_state）
             just_picked = None
-            if pick_lite: just_picked = ("极简版", "9.9")
-            elif pick_basic: just_picked = ("基础版", "24.9")
-            elif pick_pro: just_picked = ("专业版", "49.9")
-            elif pick_custom: just_picked = ("定制版", "79.9")
+            if pick_lite: just_picked = ("极简版", "14")
+            elif pick_basic: just_picked = ("基础版", "35")
+            elif pick_pro: just_picked = ("专业版", "70")
+            elif pick_custom: just_picked = ("定制版", "112")
 
             if just_picked:
                 # 切换套餐时清除之前的兑换码，防止套餐和码不匹配
@@ -1203,8 +1220,8 @@ else:
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">基础版</div>
             <div style="margin:12px 0;">
                 <span class="original-price">原价 49.9 元</span><br>
-                <span class="price" style="font-size:2rem;font-weight:800;">24.9 元</span>
-                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
+                <span class="price" style="font-size:2rem;font-weight:800;">35 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季7折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 60+ 项格式规则全量扫描<br>
@@ -1218,8 +1235,8 @@ else:
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">专业版 <span class="recommend-badge">推荐</span></div>
             <div style="margin:12px 0;">
                 <span class="original-price">原价 99.9 元</span><br>
-                <span class="price" style="font-size:2rem;font-weight:800;">49.9 元</span>
-                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
+                <span class="price" style="font-size:2rem;font-weight:800;">70 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季7折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 基础版全部功能<br>
@@ -1235,8 +1252,8 @@ else:
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">定制版</div>
             <div style="margin:12px 0;">
                 <span class="original-price">原价 159.9 元</span><br>
-                <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
-                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
+                <span class="price" style="font-size:2rem;font-weight:800;">112 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季7折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 专业版全部功能<br>
@@ -1255,7 +1272,7 @@ else:
     # 底部
     st.markdown('''<div class="app-footer">
         论文格式一键体检 &nbsp;|&nbsp; 联系微信 l8811925
-        <br>人工改格式 300-500 元，用工具最低 9.9 元，省 95%+
+        <br>人工改格式 300-500 元，用工具最低 14 元，省 95%+
         <br>检测不准确全额退款
     </div>''', unsafe_allow_html=True)
     _render_admin_panel()
