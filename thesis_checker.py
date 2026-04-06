@@ -1801,6 +1801,39 @@ class ThesisChecker:
     # --------------------------------------------------------
     # 检查模块 11: 图表编号规范
     # --------------------------------------------------------
+    def _check_seq_continuity(self, module, label, items, error_count):
+        """通用的编号连续性检查，items=[(seq_int, para_idx, text)]，返回新的 error_count"""
+        if len(items) < 2:
+            return error_count
+        items_sorted = sorted(items, key=lambda x: x[0])
+        for j in range(len(items_sorted) - 1):
+            curr_n, curr_i, curr_t = items_sorted[j]
+            next_n, next_i, next_t = items_sorted[j + 1]
+            if next_n - curr_n > 1:
+                self._add_issue(module, 'error',
+                    f'{label}{curr_n}→{label}{next_n}', curr_i, curr_t,
+                    f'{label}号不连续：{label}{curr_n}后应为{label}{curr_n+1}，实际为{label}{next_n}',
+                    f'{label}{curr_n+1}', f'{label}{next_n}（跳号）', 'supplement')
+                error_count += 1
+            elif next_n == curr_n:
+                self._add_issue(module, 'error',
+                    f'第{next_i+1}段', next_i, next_t,
+                    f'{label}号重复：{label}{curr_n}出现多次',
+                    '唯一编号', f'{label}{curr_n}重复', 'supplement')
+                error_count += 1
+        return error_count
+
+    def _parse_num_str(self, num_str):
+        """将编号字符串拆分为 (chapter, seq_int) 或 (None, seq_int)，失败返回 None"""
+        # 纯数字：如 "3"
+        if num_str.isdigit():
+            return (None, int(num_str))
+        # 章节制：如 "3-1" 或 "3.1"（仅 2 段式）
+        parts = re.split(r'[-\.]', num_str)
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return (parts[0], int(parts[1]))
+        return None
+
     def check_numbering(self):
         """检查图号、表号的连续性、一致性、中英文对应"""
         module = '编号规范'
@@ -1817,11 +1850,11 @@ class ThesisChecker:
         cn_tabs = []
         en_tabs = []
 
-        fig_cn_pat = re.compile(r'^图\s*(\d[\d\-\.]*)')
+        # 正则加 \b 或后续字符限制，防止匹配 "图1.jpg" 之类的文本
+        fig_cn_pat = re.compile(r'^图\s*(\d[\d\-\.]*)(?:\s|$|[^\.\w])')
         fig_en_pat = re.compile(r'^Fig\.?\s*(\d[\d\-\.]*)', re.IGNORECASE)
-        tab_cn_pat = re.compile(r'^表\s*(\d[\d\-\.]*)')
+        tab_cn_pat = re.compile(r'^表\s*(\d[\d\-\.]*)(?:\s|$|[^\.\w])')
         tab_en_pat = re.compile(r'^Table\s*(\d[\d\-\.]*)', re.IGNORECASE)
-        # 检测缺失编号（如"表--"、"Table -"）
         missing_num_pat = re.compile(r'^(图|表|Fig|Table)\s*[-—]{1,}')
 
         for i in range(start, end):
@@ -1831,22 +1864,21 @@ class ThesisChecker:
 
             m = fig_cn_pat.match(text)
             if m:
-                cn_figs.append((m.group(1), i, text))
+                cn_figs.append((m.group(1).rstrip('.'), i, text))
                 continue
             m = fig_en_pat.match(text)
             if m:
-                en_figs.append((m.group(1), i, text))
+                en_figs.append((m.group(1).rstrip('.'), i, text))
                 continue
             m = tab_cn_pat.match(text)
             if m:
-                cn_tabs.append((m.group(1), i, text))
+                cn_tabs.append((m.group(1).rstrip('.'), i, text))
                 continue
             m = tab_en_pat.match(text)
             if m:
-                en_tabs.append((m.group(1), i, text))
+                en_tabs.append((m.group(1).rstrip('.'), i, text))
                 continue
 
-            # 检测缺失编号
             if missing_num_pat.match(text):
                 total_checks += 1
                 self._add_issue(module, 'error', f'第{i+1}段', i, text,
@@ -1866,95 +1898,82 @@ class ThesisChecker:
                     f'"图 X"格式{has_space}处, "图X"格式{no_space}处', 'annotation')
                 error_count += 1
 
-        # --- 图号连续性 ---
+        # --- 图号连续性（纯数字 + 章节制） ---
         total_checks += 1
         if cn_figs:
-            nums = []
+            pure_nums = []
+            chapter_figs = {}
             for num_str, idx, txt in cn_figs:
-                # 纯数字编号（非章节制）
-                try:
-                    nums.append((int(num_str), idx, txt))
-                except ValueError:
-                    pass  # 章节制编号如 "3-1"，单独处理
+                parsed = self._parse_num_str(num_str)
+                if parsed is None:
+                    continue
+                ch, seq = parsed
+                if ch is None:
+                    pure_nums.append((seq, idx, txt))
+                else:
+                    chapter_figs.setdefault(ch, []).append((seq, idx, txt))
 
-            if nums:
-                nums.sort(key=lambda x: x[0])
-                for j in range(len(nums) - 1):
-                    curr_n, curr_i, curr_t = nums[j]
-                    next_n, next_i, next_t = nums[j + 1]
-                    if next_n - curr_n > 1:
-                        self._add_issue(module, 'error',
-                            f'图{curr_n}→图{next_n}', curr_i, curr_t,
-                            f'图号不连续：图{curr_n}后应为图{curr_n+1}，实际为图{next_n}',
-                            f'图{curr_n+1}', f'图{next_n}（跳号）', 'supplement')
-                        error_count += 1
-                    elif next_n == curr_n:
-                        self._add_issue(module, 'error',
-                            f'第{next_i+1}段', next_i, next_t,
-                            f'图号重复：图{curr_n}出现多次',
-                            '唯一编号', f'图{curr_n}重复', 'supplement')
-                        error_count += 1
+            error_count = self._check_seq_continuity(module, '图', pure_nums, error_count)
+            for ch, items in chapter_figs.items():
+                error_count = self._check_seq_continuity(module, f'图{ch}-', items, error_count)
 
-        # --- 中英文图号对应 ---
+        # --- 表号连续性（纯数字 + 章节制） ---
         total_checks += 1
-        cn_fig_nums = [num for num, idx, txt in cn_figs]
-        en_fig_nums = [num for num, idx, txt in en_figs]
-        for num in cn_fig_nums:
-            if num not in en_fig_nums:
-                # 找到对应的中文图所在行
-                para_idx = next((idx for n, idx, t in cn_figs if n == num), -1)
-                self._add_issue(module, 'warning', f'图{num}', para_idx, '',
-                    f'中文图{num}缺少对应的英文Fig.{num}',
-                    f'Fig.{num}', '未找到', 'official')
+        if cn_tabs:
+            pure_nums = []
+            chapter_tabs = {}
+            for num_str, idx, txt in cn_tabs:
+                parsed = self._parse_num_str(num_str)
+                if parsed is None:
+                    continue
+                ch, seq = parsed
+                if ch is None:
+                    pure_nums.append((seq, idx, txt))
+                else:
+                    chapter_tabs.setdefault(ch, []).append((seq, idx, txt))
+
+            error_count = self._check_seq_continuity(module, '表', pure_nums, error_count)
+            for ch, items in chapter_tabs.items():
+                error_count = self._check_seq_continuity(module, f'表{ch}-', items, error_count)
+
+        # --- 中英文图号对应（归一化比较，去前导零） ---
+        total_checks += 1
+        def _normalize_num(s):
+            """归一化编号：去前导零，统一分隔符"""
+            parts = re.split(r'[-\.]', s)
+            return '-'.join(str(int(p)) if p.isdigit() else p for p in parts)
+
+        cn_fig_map = {_normalize_num(num): (idx, txt) for num, idx, txt in cn_figs}
+        en_fig_map = {_normalize_num(num): (idx, txt) for num, idx, txt in en_figs}
+        for num_key in cn_fig_map:
+            if num_key not in en_fig_map:
+                idx = cn_fig_map[num_key][0]
+                self._add_issue(module, 'warning', f'图{num_key}', idx, '',
+                    f'中文图{num_key}缺少对应的英文Fig.{num_key}',
+                    f'Fig.{num_key}', '未找到', 'official')
                 error_count += 0.5
-        for num in en_fig_nums:
-            if num not in cn_fig_nums:
-                para_idx = next((idx for n, idx, t in en_figs if n == num), -1)
-                self._add_issue(module, 'warning', f'Fig.{num}', para_idx, '',
-                    f'英文Fig.{num}缺少对应的中文图{num}',
-                    f'图{num}', '未找到', 'official')
+        for num_key in en_fig_map:
+            if num_key not in cn_fig_map:
+                idx = en_fig_map[num_key][0]
+                self._add_issue(module, 'warning', f'Fig.{num_key}', idx, '',
+                    f'英文Fig.{num_key}缺少对应的中文图{num_key}',
+                    f'图{num_key}', '未找到', 'official')
                 error_count += 0.5
 
-        # --- Fig 编号与图编号数字是否匹配 ---
+        # --- Fig 编号与图编号数字是否匹配（限制在正文范围内） ---
         total_checks += 1
-        # 配对相邻的中英文图题
+        ref_start = self.markers.get('references') or end
         for cn_num, cn_idx, cn_txt in cn_figs:
-            # 找紧跟其后的 Fig
-            if cn_idx + 1 < len(paras):
-                next_text = paras[cn_idx + 1].text.strip()
+            next_idx = cn_idx + 1
+            if next_idx < ref_start and next_idx < len(paras):
+                next_text = paras[next_idx].text.strip()
                 m = fig_en_pat.match(next_text)
-                if m and m.group(1) != cn_num:
+                if m and _normalize_num(m.group(1).rstrip('.')) != _normalize_num(cn_num):
                     self._add_issue(module, 'error',
                         f'第{cn_idx+1}-{cn_idx+2}段', cn_idx, cn_txt,
                         f'中英文图号不匹配：图{cn_num}对应的Fig编号为{m.group(1)}',
                         f'Fig.{cn_num}', f'Fig.{m.group(1)}', 'supplement')
                     error_count += 1
-
-        # --- 表号连续性（章节编号制） ---
-        total_checks += 1
-        if cn_tabs:
-            # 按章节分组检查
-            chapter_tabs = {}
-            for num_str, idx, txt in cn_tabs:
-                parts = re.split(r'[-\.]', num_str)
-                if len(parts) == 2:
-                    ch, seq = parts
-                    try:
-                        chapter_tabs.setdefault(ch, []).append((int(seq), idx, txt))
-                    except ValueError:
-                        pass  # 跳过非纯数字序号（如 "1a"）
-
-            for ch, items in chapter_tabs.items():
-                items.sort(key=lambda x: x[0])
-                for j in range(len(items) - 1):
-                    curr_seq, curr_i, curr_t = items[j]
-                    next_seq, next_i, next_t = items[j + 1]
-                    if next_seq - curr_seq > 1:
-                        self._add_issue(module, 'warning',
-                            f'表{ch}-{curr_seq}→表{ch}-{next_seq}', curr_i, curr_t,
-                            f'表号不连续：表{ch}-{curr_seq}后应为表{ch}-{curr_seq+1}',
-                            f'表{ch}-{curr_seq+1}', f'表{ch}-{next_seq}（跳号）', 'supplement')
-                        error_count += 0.5
 
         total_checks = max(total_checks, 1)
         score = max(0, 8 * (1 - error_count / max(total_checks, 1)))
