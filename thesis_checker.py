@@ -464,21 +464,19 @@ class ThesisChecker:
     # 检查模块 1: 页面设置
     # --------------------------------------------------------
     def check_page_setup(self):
-        """检查页面设置：纸张大小、页边距"""
+        """检查页面设置：纸张大小、页边距
+        有自定义规则时：对标具体边距值；无自定义规则时：各节边距一致性
+        """
         module = '页面设置'
         error_count = 0
         total_checks = 0
         r = self.rules
 
-        target_margin_top = Cm(r['page']['margin_top_cm'])
-        target_margin_bottom = Cm(r['page']['margin_bottom_cm'])
-        target_margin_left = Cm(r['page']['margin_left_cm'])
-        target_margin_right = Cm(r['page']['margin_right_cm'])
+        sections = list(self.doc.sections)
 
-        for idx, section in enumerate(self.doc.sections):
+        # A4 纸张检查（通用，所有论文都是 A4）
+        for idx, section in enumerate(sections):
             sec_label = f'节{idx+1}'
-
-            # 纸张大小
             total_checks += 1
             w, h = section.page_width, section.page_height
             if abs(w - A4_WIDTH) > SIZE_TOLERANCE or abs(h - A4_HEIGHT) > SIZE_TOLERANCE:
@@ -487,20 +485,59 @@ class ThesisChecker:
                     f'{w/360000:.1f}cm × {h/360000:.1f}cm', 'official')
                 error_count += 1
 
-            # 页边距
-            margins = {
-                '上边距': (section.top_margin, target_margin_top, r['page']['margin_top_cm']),
-                '下边距': (section.bottom_margin, target_margin_bottom, r['page']['margin_bottom_cm']),
-                '左边距': (section.left_margin, target_margin_left, r['page']['margin_left_cm']),
-                '右边距': (section.right_margin, target_margin_right, r['page']['margin_right_cm']),
-            }
-            for name, (val, target, target_cm) in margins.items():
-                total_checks += 1
-                if val is not None and abs(val - target) > MARGIN_TOLERANCE:
-                    self._add_issue(module, 'error', f'{sec_label} {name}', -1, '',
-                        f'{name}须为{target_cm}cm', f'{target_cm}cm',
-                        f'{val/360000:.2f}cm', 'official')
-                    error_count += 1
+        if self._has_custom_rules:
+            # ===== 定制版：对标具体边距值 =====
+            target_margin_top = Cm(r['page']['margin_top_cm'])
+            target_margin_bottom = Cm(r['page']['margin_bottom_cm'])
+            target_margin_left = Cm(r['page']['margin_left_cm'])
+            target_margin_right = Cm(r['page']['margin_right_cm'])
+
+            for idx, section in enumerate(sections):
+                sec_label = f'节{idx+1}'
+                margins = {
+                    '上边距': (section.top_margin, target_margin_top, r['page']['margin_top_cm']),
+                    '下边距': (section.bottom_margin, target_margin_bottom, r['page']['margin_bottom_cm']),
+                    '左边距': (section.left_margin, target_margin_left, r['page']['margin_left_cm']),
+                    '右边距': (section.right_margin, target_margin_right, r['page']['margin_right_cm']),
+                }
+                for name, (val, target, target_cm) in margins.items():
+                    total_checks += 1
+                    if val is not None and abs(val - target) > MARGIN_TOLERANCE:
+                        self._add_issue(module, 'error', f'{sec_label} {name}', -1, '',
+                            f'{name}须为{target_cm}cm', f'{target_cm}cm',
+                            f'{val/360000:.2f}cm', 'official')
+                        error_count += 1
+        else:
+            # ===== 通用版：各节边距一致性检查 =====
+            if len(sections) > 1:
+                # 以第一节（封面节之后）的边距为基准
+                ref_sec = sections[1] if len(sections) > 1 else sections[0]
+                ref_margins = {
+                    '上边距': ref_sec.top_margin,
+                    '下边距': ref_sec.bottom_margin,
+                    '左边距': ref_sec.left_margin,
+                    '右边距': ref_sec.right_margin,
+                }
+                for idx, section in enumerate(sections):
+                    if idx <= 1:
+                        continue  # 跳过封面节和基准节
+                    sec_label = f'节{idx+1}'
+                    current = {
+                        '上边距': section.top_margin,
+                        '下边距': section.bottom_margin,
+                        '左边距': section.left_margin,
+                        '右边距': section.right_margin,
+                    }
+                    for name in ref_margins:
+                        total_checks += 1
+                        ref_val = ref_margins[name]
+                        cur_val = current[name]
+                        if ref_val is not None and cur_val is not None and abs(cur_val - ref_val) > MARGIN_TOLERANCE:
+                            self._add_issue(module, 'warning', f'{sec_label} {name}', -1, '',
+                                f'{name}与其他节不一致',
+                                f'{ref_val/360000:.2f}cm',
+                                f'{cur_val/360000:.2f}cm', 'supplement')
+                            error_count += 0.5
 
         total_checks = max(total_checks, 1)
         score = max(0, 10 * (1 - error_count / total_checks))
@@ -835,24 +872,26 @@ class ThesisChecker:
                 '非居中', 'supplement')
             error_count += 1
 
-        for run in title_para.runs:
-            if run.text.strip():
-                size_pt = get_effective_font_size(run, title_para)
-                if size_pt and abs(size_pt - exp_toc_title_size) > 1:
-                    self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
-                        title_para.text, f'目录标题须为{r["toc"]["title_size"]}',
-                        f'{r["toc"]["title_size"]}({exp_toc_title_size}pt)',
-                        pt_to_name(size_pt), 'supplement')
-                    error_count += 1
+        # 目录标题字号字体（仅定制版对标具体规则）
+        if self._has_custom_rules:
+            for run in title_para.runs:
+                if run.text.strip():
+                    size_pt = get_effective_font_size(run, title_para)
+                    if size_pt and abs(size_pt - exp_toc_title_size) > 1:
+                        self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
+                            title_para.text, f'目录标题须为{r["toc"]["title_size"]}',
+                            f'{r["toc"]["title_size"]}({exp_toc_title_size}pt)',
+                            pt_to_name(size_pt), 'supplement')
+                        error_count += 1
 
-                ea_font = get_east_asian_font(run)
-                if ea_font and not _font_match(ea_font, r['toc']['title_font']):
-                    self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
-                        title_para.text, f'目录标题须为{r["toc"]["title_font"]}',
-                        r['toc']['title_font'],
-                        ea_font, 'supplement')
-                    error_count += 1
-                break
+                    ea_font = get_east_asian_font(run)
+                    if ea_font and not _font_match(ea_font, r['toc']['title_font']):
+                        self._add_issue(module, 'error', f'第{toc_idx+1}段(目录标题)', toc_idx,
+                            title_para.text, f'目录标题须为{r["toc"]["title_font"]}',
+                            r['toc']['title_font'],
+                            ea_font, 'supplement')
+                        error_count += 1
+                    break
 
         score = max(0, 8 * (1 - error_count / total_checks))
         self.scores[module] = (round(score, 1), 8)
@@ -1158,7 +1197,9 @@ class ThesisChecker:
         return '封面/前置页'
 
     def _check_caption_format(self, module, para, para_idx, text, caption_type, total_checks):
-        """检查图题/表题的字号、字体，逐条报告"""
+        """检查图题/表题的字号、字体（仅定制版对标规则）"""
+        if not self._has_custom_rules:
+            return  # 通用版在 check_figures_tables 中做一致性检查
         r = self.rules
         EXPECTED_SIZE = FONT_SIZE_MAP[r['caption']['size']]
         EXPECTED_NAME = f'{r["caption"]["size"]}({EXPECTED_SIZE}pt)'
@@ -1169,13 +1210,11 @@ class ThesisChecker:
         for run in para.runs:
             if not run.text.strip():
                 continue
-            # 字号
             size_pt = get_effective_font_size(run, para)
             if size_pt and abs(size_pt - EXPECTED_SIZE) > 1.0:
                 self._add_issue(module, 'warning', loc, para_idx,
                     text, f'{caption_type}字号应为{EXPECTED_NAME}',
                     EXPECTED_NAME, pt_to_name(size_pt), 'supplement')
-            # 中文字体
             if has_chinese(run.text):
                 ea_font = get_east_asian_font(run)
                 if ea_font and not _font_match(ea_font, r['caption']['font']):
@@ -1311,6 +1350,51 @@ class ThesisChecker:
                         '三线表（上下粗线+中间细线，无左右线）',
                         '检测到左右边框', 'supplement')
                     error_count += 1
+
+        # ---- 通用版：图题/表题格式一致性检查 ----
+        if not self._has_custom_rules:
+            from collections import Counter
+            for caption_type, pattern in [('图题', fig_pattern), ('表题', tab_pattern)]:
+                caption_sizes = []
+                caption_fonts = []
+                caption_paras = []
+                for i in range(start, min(end, len(paras))):
+                    text = paras[i].text.strip()
+                    if pattern.match(text):
+                        caption_paras.append((i, text))
+                        for run in paras[i].runs:
+                            if not run.text.strip():
+                                continue
+                            s = get_effective_font_size(run, paras[i])
+                            if s:
+                                caption_sizes.append((round(s, 1), i, text))
+                            if has_chinese(run.text):
+                                f = get_east_asian_font(run)
+                                if f:
+                                    caption_fonts.append((f, i, text))
+                            break
+                if len(caption_sizes) >= 2:
+                    base_size = Counter(s for s, _, _ in caption_sizes).most_common(1)[0][0]
+                    for s, idx, txt in caption_sizes:
+                        if abs(s - base_size) > 1:
+                            total_checks += 1
+                            section = self._get_section_label(idx)
+                            self._add_issue(module, 'warning',
+                                f'第{idx+1}段 [{section}]({caption_type})', idx, txt,
+                                f'{caption_type}字号不一致（多数为{pt_to_name(base_size)}）',
+                                pt_to_name(base_size), pt_to_name(s), 'supplement')
+                            error_count += 0.5
+                if len(caption_fonts) >= 2:
+                    base_font = Counter(f for f, _, _ in caption_fonts).most_common(1)[0][0]
+                    for f, idx, txt in caption_fonts:
+                        if f != base_font and not _font_match(f, base_font):
+                            total_checks += 1
+                            section = self._get_section_label(idx)
+                            self._add_issue(module, 'warning',
+                                f'第{idx+1}段 [{section}]({caption_type})', idx, txt,
+                                f'{caption_type}字体不一致（多数为{base_font}）',
+                                base_font, f, 'supplement')
+                            error_count += 0.5
 
         total_checks = max(total_checks, 1)
         score = max(0, 10 * (1 - error_count / total_checks))
