@@ -300,10 +300,10 @@ button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"] {
 # 套餐权限配置
 # ============================================================
 TIER_CONFIG = {
-    'lite':   {'recheck_limit': 0,  'rules_view': False, 'rules_edit': False, 'ai_parse': False},
-    'basic':  {'recheck_limit': 3,  'rules_view': True,  'rules_edit': False, 'ai_parse': False},
-    'pro':    {'recheck_limit': -1, 'rules_view': True,  'rules_edit': True,  'ai_parse': False},
-    'custom': {'recheck_limit': -1, 'rules_view': True,  'rules_edit': True,  'ai_parse': True},
+    'lite':   {'recheck_limit': 0,  'issue_limit': 5,  'show_suggestion': False, 'show_filter': False, 'can_download': False, 'rules_view': False, 'rules_edit': False, 'ai_parse': False},
+    'basic':  {'recheck_limit': 3,  'issue_limit': -1, 'show_suggestion': False, 'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': False, 'ai_parse': False},
+    'pro':    {'recheck_limit': -1, 'issue_limit': -1, 'show_suggestion': True,  'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': True,  'ai_parse': False},
+    'custom': {'recheck_limit': -1, 'issue_limit': -1, 'show_suggestion': True,  'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': True,  'ai_parse': True},
 }
 
 def _get_tier_config():
@@ -437,7 +437,7 @@ def render_score_ring(score, max_score, grade):
 # ============================================================
 # 渲染问题卡片（复用）
 # ============================================================
-def render_issue(issue):
+def render_issue(issue, show_suggestion=True):
     _e = html_mod.escape
     sev_c = {'error':'#f87171','warning':'#fbbf24','info':'#60a5fa'}
     src_c = {'official':'#a78bfa','supplement':'#2dd4bf','annotation':'#fb923c'}
@@ -446,6 +446,17 @@ def render_issue(issue):
     preview = ''
     if issue.get('text_preview') and issue['text_preview'] != '(空)':
         preview = f'<div style="font-size:0.75rem;color:#64748b;margin-top:4px;">{_e(issue["text_preview"])}</div>'
+    suggestion_html = ''
+    if show_suggestion:
+        suggestion_html = f'''<div style="font-size:0.8rem;">
+        <span style="color:#10b981;">期望: {_e(issue['expected'])}</span> &nbsp;→&nbsp;
+        <span style="color:#ef4444;">实际: {_e(issue['actual'])}</span>
+      </div>'''
+    else:
+        suggestion_html = f'''<div style="font-size:0.8rem;">
+        <span style="color:#ef4444;">实际: {_e(issue['actual'])}</span>
+        <span style="color:#64748b;font-size:0.75rem;margin-left:8px;">🔒 升级专业版查看修改建议</span>
+      </div>'''
     return f'''<div class="issue-card" style="border-left:3px solid {bc};">
       <div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
         <span style="background:{bc}22;color:{bc};padding:2px 10px;border-radius:4px;font-size:0.75rem;font-weight:600;">{_e(issue['severity_label'])}</span>
@@ -454,10 +465,7 @@ def render_issue(issue):
         <span style="color:#64748b;font-size:0.75rem;font-family:monospace;">{_e(issue['location'])}</span>
       </div>
       <div style="font-size:0.9rem;color:#e2e8f0;margin-bottom:4px;">{_e(issue['rule'])}</div>
-      <div style="font-size:0.8rem;">
-        <span style="color:#10b981;">期望: {_e(issue['expected'])}</span> &nbsp;→&nbsp;
-        <span style="color:#ef4444;">实际: {_e(issue['actual'])}</span>
-      </div>{preview}
+      {suggestion_html}{preview}
     </div>'''
 
 # ============================================================
@@ -672,7 +680,7 @@ st.markdown('''
     <p>盲审不挂格式分 · 答辩不被打回改 · 5分钟查出125项问题</p>
     <div class="highlights">
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">125项</div><div class="hl-label">深度检查</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">13大</div><div class="hl-label">模块全覆盖</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">14大</div><div class="hl-label">模块全覆盖</div></div>
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">5分钟</div><div class="hl-label">出报告</div></div>
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">盲审级</div><div class="hl-label">严格标准</div></div>
     </div>
@@ -947,14 +955,14 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">极简版</div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 19.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;color:#94a3b8;">14 元</span>
-                        <span class="discount-badge">毕业季7折</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;color:#94a3b8;">9.9 元</span>
+                        <span class="discount-badge">毕业季半价</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         60+ 项规则全量扫描<br>
-                        全部问题列表 + 位置定位<br>
-                        按严重度/模块智能筛选<br>
-                        下载完整 HTML 报告</div>
+                        查看前 5 条问题详情<br>
+                        含问题位置定位<br>
+                        1 次检查机会</div>
                 </div>''', unsafe_allow_html=True)
                 pick_lite = st.button("选择极简版", key="pick_lite", use_container_width=True)
             with t2:
@@ -962,13 +970,12 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">基础版</div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 49.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;">35 元</span>
-                        <span class="discount-badge">毕业季7折</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;">24.9 元</span>
+                        <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         极简版全部功能<br>
-                        每条问题附修改建议<br>
-                        <b>查看全部 60+ 条检查规则</b><br>
+                        <b>查看全部问题详情</b><br>
                         按严重度/模块智能筛选<br>
                         下载完整 HTML 报告<br>
                         含 3 次复查</div>
@@ -979,15 +986,15 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">专业版 <span class="recommend-badge">推荐</span></div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 99.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;">70 元</span>
-                        <span class="discount-badge">毕业季7折</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;">49.9 元</span>
+                        <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         基础版全部功能<br>
+                        <b>每条问题附修改建议</b><br>
                         <b>自定义编辑全部检查规则</b><br>
-                        <b>适配任意学校格式要求</b><br>
-                        不限次复查<br>
-                        优先客服响应</div>
+                        适配任意学校格式要求<br>
+                        不限次复查 · 优先客服</div>
                 </div>''', unsafe_allow_html=True)
                 pick_pro = st.button("选择专业版", key="pick_pro", type="primary", use_container_width=True)
 
@@ -998,8 +1005,8 @@ if uploaded_file is not None and _can_check:
                     <div style="font-size:1rem;font-weight:700;">定制版</div>
                     <div style="margin:10px 0;">
                         <span class="original-price">原价 159.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;">112 元</span>
-                        <span class="discount-badge">毕业季7折</span>
+                        <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
+                        <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
                         专业版全部功能<br>
@@ -1015,10 +1022,10 @@ if uploaded_file is not None and _can_check:
 
             # 选定套餐后弹出付款区（用按钮当前帧判断，不持久化到 session_state）
             just_picked = None
-            if pick_lite: just_picked = ("极简版", "14")
-            elif pick_basic: just_picked = ("基础版", "35")
-            elif pick_pro: just_picked = ("专业版", "70")
-            elif pick_custom: just_picked = ("定制版", "112")
+            if pick_lite: just_picked = ("极简版", "9.9")
+            elif pick_basic: just_picked = ("基础版", "24.9")
+            elif pick_pro: just_picked = ("专业版", "49.9")
+            elif pick_custom: just_picked = ("定制版", "79.9")
 
             if just_picked:
                 # 切换套餐时清除之前的兑换码，防止套餐和码不匹配
@@ -1109,25 +1116,26 @@ if uploaded_file is not None and _can_check:
                             st.warning("请输入兑换码")
                     st.markdown("""
                     <div style="font-size:0.8rem;color:var(--text-muted);margin-top:12px;line-height:1.8;">
-                        解锁后包含：<br>
-                        &nbsp;&nbsp;全部问题的详细位置和修改建议<br>
-                        &nbsp;&nbsp;按严重度 / 模块 / 来源筛选<br>
-                        &nbsp;&nbsp;下载完整 HTML 报告文件
+                        解锁后包含（按套餐分级）：<br>
+                        &nbsp;&nbsp;极简版：前 5 条问题详情<br>
+                        &nbsp;&nbsp;基础版：全部问题 + 筛选 + 下载报告<br>
+                        &nbsp;&nbsp;专业版：全部 + 修改建议 + 自定义规则
                     </div>""", unsafe_allow_html=True)
 
         else:
-            # ========== 完整报告 ==========
-            st.markdown("**已解锁完整报告**")
+            # ========== 已解锁报告（根据套餐权限分级展示）==========
+            tc = _get_tier_config()
+            tier_name = st.session_state.get('user_tier', 'basic')
+            tier_labels = {'lite': '极简版', 'basic': '基础版', 'pro': '专业版', 'custom': '定制版'}
+            st.markdown(f"**已解锁 · {tier_labels.get(tier_name, '基础版')}**")
 
             # ---- 规则面板（根据套餐权限展示）----
             current_rules = st.session_state.get('custom_rules') or DEFAULT_RULES
-            tc = _get_tier_config()
             if tc['rules_edit']:
                 st.markdown("---")
                 st.markdown("#### 检查规则（可编辑）")
                 st.caption("修改规则后点击「重新检查」，将按新规则重新评估")
                 edited_rules = _render_rules_panel(current_rules, editable=True)
-                # 复查次数控制
                 recheck_count = st.session_state.get('recheck_count', 0)
                 recheck_limit = tc['recheck_limit']
                 can_recheck = (recheck_limit == -1 or recheck_count < recheck_limit)
@@ -1144,36 +1152,60 @@ if uploaded_file is not None and _can_check:
                 st.markdown("---")
                 st.markdown("#### 本次使用的检查规则")
                 _render_rules_panel(current_rules, editable=False)
-                # 基础版复查：重新上传同一文件即可，但有次数限制
                 recheck_count = st.session_state.get('recheck_count', 0)
                 recheck_limit = tc['recheck_limit']
                 if recheck_limit > 0:
                     remaining = max(0, recheck_limit - recheck_count)
                     st.caption(f"剩余复查次数：{remaining}/{recheck_limit}")
 
-            f1, f2, f3 = st.columns(3)
-            with f1:
-                sev_f = st.selectbox("严重度", ['全部','错误','警告','建议'], key='sf')
-            with f2:
-                mod_f = st.selectbox("模块", ['全部']+[m['name'] for m in mods], key='mf')
-            with f3:
-                src_f = st.selectbox("来源", ['全部','官方规定','专业补充','批注修订'], key='rf')
-
-            sev_map = {'错误':'error','警告':'warning','建议':'info'}
-            src_map = {'官方规定':'official','专业补充':'supplement','批注修订':'annotation'}
+            # ---- 筛选器（基础版及以上）----
             filtered = issues
-            if sev_f != '全部': filtered = [i for i in filtered if i['severity'] == sev_map[sev_f]]
-            if mod_f != '全部': filtered = [i for i in filtered if i['module'] == mod_f]
-            if src_f != '全部': filtered = [i for i in filtered if i['source'] == src_map[src_f]]
+            if tc['show_filter']:
+                f1, f2, f3 = st.columns(3)
+                with f1:
+                    sev_f = st.selectbox("严重度", ['全部','错误','警告','建议'], key='sf')
+                with f2:
+                    mod_f = st.selectbox("模块", ['全部']+[m['name'] for m in mods], key='mf')
+                with f3:
+                    src_f = st.selectbox("来源", ['全部','官方规定','专业补充','批注修订'], key='rf')
+                sev_map = {'错误':'error','警告':'warning','建议':'info'}
+                src_map = {'官方规定':'official','专业补充':'supplement','批注修订':'annotation'}
+                if sev_f != '全部': filtered = [i for i in filtered if i['severity'] == sev_map[sev_f]]
+                if mod_f != '全部': filtered = [i for i in filtered if i['module'] == mod_f]
+                if src_f != '全部': filtered = [i for i in filtered if i['source'] == src_map[src_f]]
 
-            st.caption(f"显示 {len(filtered)} / {len(issues)} 条")
-            for issue in filtered:
-                st.markdown(render_issue(issue), unsafe_allow_html=True)
+            # ---- 问题列表（按套餐限制条数）----
+            issue_limit = tc['issue_limit']
+            display_issues = filtered if issue_limit == -1 else filtered[:issue_limit]
+            st.caption(f"显示 {len(display_issues)} / {len(issues)} 条")
+            for issue in display_issues:
+                st.markdown(render_issue(issue, show_suggestion=tc['show_suggestion']), unsafe_allow_html=True)
+
+            # 极简版：显示剩余条数的升级提示
+            if issue_limit != -1 and len(filtered) > issue_limit:
+                remaining_count = len(filtered) - issue_limit
+                st.markdown(f'''
+                <div style="text-align:center;padding:24px;background:var(--bg-card);border-radius:12px;
+                    border:1px dashed var(--border-card);margin:12px 0;">
+                    <div style="font-size:1.1rem;color:var(--text-primary);margin-bottom:6px;">
+                        还有 {remaining_count} 条问题未展示</div>
+                    <div style="font-size:0.85rem;color:var(--text-secondary);">
+                        升级基础版查看全部问题 + 下载完整报告</div>
+                </div>''', unsafe_allow_html=True)
+
+            # 基础版无修改建议时的升级提示
+            if not tc['show_suggestion']:
+                st.info("升级专业版可查看每条问题的修改建议，快速定位修改方向")
 
             st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
-            st.download_button("下载完整 HTML 报告", data=html_content,
-                file_name=f"格式审查报告_{report_id}.html", mime="text/html",
-                type="primary", use_container_width=True)
+
+            # ---- 下载按钮（基础版及以上）----
+            if tc['can_download']:
+                st.download_button("下载完整 HTML 报告", data=html_content,
+                    file_name=f"格式审查报告_{report_id}.html", mime="text/html",
+                    type="primary", use_container_width=True)
+            else:
+                st.button("🔒 下载报告（基础版及以上）", disabled=True, use_container_width=True)
 
     # 页脚
     st.markdown(f'''<div class="app-footer">
@@ -1190,11 +1222,11 @@ else:
     # 模块介绍用卡片网格
     modules_names = [
         "页面设置", "封面格式", "摘要规范", "目录格式", "正文格式",
-        "标题层级", "图表规范", "页眉页脚", "参考文献", "结构完整",
-        "编号规范", "单位符号", "内容规范",
+        "标题层级", "图表规范", "页眉页脚", "页码", "参考文献",
+        "结构完整", "编号规范", "单位符号", "内容规范",
     ]
 
-    st.markdown("#### 13 个检测模块全覆盖")
+    st.markdown("#### 14 个检测模块全覆盖")
     tags = '<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:20px 0;">'
     for name in modules_names:
         tags += f'<span class="module-tag">{name}</span>'
@@ -1211,23 +1243,37 @@ else:
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">免费体验版</div>
             <div class="price" style="font-size:2rem;font-weight:800;margin:12px 0;">0 元</div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;">
-                总分 + 13个模块评分概览<br>
+                总分 + 14个模块评分概览<br>
                 免费查看 3 条格式错误详情<br>
                 限 2 次检查机会
+            </div>
+        </div>
+        <div class="glass-card tier-free" style="text-align:center;padding:24px 16px;">
+            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">极简版</div>
+            <div style="margin:12px 0;">
+                <span class="original-price">原价 19.9 元</span><br>
+                <span class="price" style="font-size:2rem;font-weight:800;">9.9 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季半价</span>
+            </div>
+            <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
+                60+ 项规则全量扫描<br>
+                查看前 5 条问题详情<br>
+                含问题位置定位<br>
+                1 次检查机会
             </div>
         </div>
         <div class="glass-card tier-basic" style="text-align:center;padding:24px 16px;">
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">基础版</div>
             <div style="margin:12px 0;">
                 <span class="original-price">原价 49.9 元</span><br>
-                <span class="price" style="font-size:2rem;font-weight:800;">35 元</span>
-                <span class="discount-badge" style="margin-left:6px;">毕业季7折</span>
+                <span class="price" style="font-size:2rem;font-weight:800;">24.9 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
-                60+ 项格式规则全量扫描<br>
-                全部问题精确到段落 + 修改建议<br>
-                按严重度/模块/来源智能筛选<br>
-                下载完整 HTML 审查报告<br>
+                极简版全部功能<br>
+                <b>查看全部问题详情</b><br>
+                按严重度/模块智能筛选<br>
+                下载完整 HTML 报告<br>
                 含 3 次复查（初稿+修改稿+终稿）
             </div>
         </div>
@@ -1235,15 +1281,15 @@ else:
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">专业版 <span class="recommend-badge">推荐</span></div>
             <div style="margin:12px 0;">
                 <span class="original-price">原价 99.9 元</span><br>
-                <span class="price" style="font-size:2rem;font-weight:800;">70 元</span>
-                <span class="discount-badge" style="margin-left:6px;">毕业季7折</span>
+                <span class="price" style="font-size:2rem;font-weight:800;">49.9 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 基础版全部功能<br>
+                <b>每条问题附修改建议</b><br>
                 <b>自定义编辑全部检查规则</b><br>
-                <b>适配任意学校格式要求</b><br>
-                不限次复查<br>
-                优先客服响应
+                适配任意学校格式要求<br>
+                不限次复查 · 优先客服
             </div>
         </div>
     </div>
@@ -1252,8 +1298,8 @@ else:
             <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">定制版</div>
             <div style="margin:12px 0;">
                 <span class="original-price">原价 159.9 元</span><br>
-                <span class="price" style="font-size:2rem;font-weight:800;">112 元</span>
-                <span class="discount-badge" style="margin-left:6px;">毕业季7折</span>
+                <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
+                <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
                 专业版全部功能<br>
@@ -1272,7 +1318,7 @@ else:
     # 底部
     st.markdown('''<div class="app-footer">
         论文格式一键体检 &nbsp;|&nbsp; 联系微信 l8811925
-        <br>人工改格式 300-500 元，用工具最低 14 元，省 95%+
+        <br>人工改格式 300-500 元，用工具最低 9.9 元，省 95%+
         <br>检测不准确全额退款
     </div>''', unsafe_allow_html=True)
     _render_admin_panel()
