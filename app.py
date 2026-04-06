@@ -256,7 +256,7 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"] {
 .tier-feature { color:var(--text-secondary); font-size:0.85rem; line-height:1.8; }
 
 /* ---- 网格 ---- */
-.pricing-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin-bottom:12px; }
+.pricing-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:12px; }
 .mod-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
 
 /* ---- 环形图 ---- */
