@@ -155,7 +155,7 @@ html, body, [class*="css"] {
 }
 [data-testid="stFileUploaderDropzone"] small { font-size:0!important; }
 [data-testid="stFileUploaderDropzone"] small::after {
-    content:"支持 .doc / .docx 格式，最大 50MB"; font-size:0.75rem; color:var(--text-muted);
+    content:"支持 .doc / .docx 格式，最大 200MB"; font-size:0.75rem; color:var(--text-muted);
 }
 [data-testid="stFileUploaderDropzone"] button {
     font-size:0!important; min-height:42px; padding:0 24px!important;
