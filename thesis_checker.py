@@ -1939,7 +1939,10 @@ class ThesisChecker:
                 parts = re.split(r'[-\.]', num_str)
                 if len(parts) == 2:
                     ch, seq = parts
-                    chapter_tabs.setdefault(ch, []).append((int(seq), idx, txt))
+                    try:
+                        chapter_tabs.setdefault(ch, []).append((int(seq), idx, txt))
+                    except ValueError:
+                        pass  # 跳过非纯数字序号（如 "1a"）
 
             for ch, items in chapter_tabs.items():
                 items.sort(key=lambda x: x[0])
