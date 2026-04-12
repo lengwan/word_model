@@ -882,15 +882,24 @@ if uploaded_file is not None and _can_check:
             unsafe_allow_html=True)
         # 排名机制（基于分数估算百分位）
         pct_score = data['pct']
-        if pct_score >= 90: beat_pct = 95
-        elif pct_score >= 80: beat_pct = 80
-        elif pct_score >= 70: beat_pct = 55
-        elif pct_score >= 60: beat_pct = 35
-        elif pct_score >= 50: beat_pct = 20
-        else: beat_pct = 8
+        if pct_score >= 90: beat_pct = 85
+        elif pct_score >= 80: beat_pct = 65
+        elif pct_score >= 70: beat_pct = 40
+        elif pct_score >= 60: beat_pct = 20
+        elif pct_score >= 50: beat_pct = 10
+        else: beat_pct = 5
         st.markdown(f'<p style="text-align:center;font-size:0.85rem;color:#94a3b8;margin-top:4px;">'
             f'你的论文格式超过了 <b style="color:#818cf8;">{beat_pct}%</b> 的论文</p>',
             unsafe_allow_html=True)
+        # 风险提示（根据分数动态展示）
+        if data['error_count'] > 0:
+            st.markdown(f'<p style="text-align:center;font-size:0.78rem;color:#f87171;margin-top:2px;">'
+                f'⚠ 检测到 {data["error_count"]} 处严重格式错误，建议提交前逐一修复</p>',
+                unsafe_allow_html=True)
+        if pct_score < 80:
+            st.markdown('<p style="text-align:center;font-size:0.75rem;color:#94a3b8;margin-top:0;">'
+                '格式不达标是盲审退回的常见原因之一</p>',
+                unsafe_allow_html=True)
     with col_metrics:
         m1, m2, m3 = st.columns(3)
         m1.metric("严重错误", data['error_count'])
@@ -920,7 +929,7 @@ if uploaded_file is not None and _can_check:
     st.markdown(f"#### 问题详情（共 {len(issues)} 条）")
 
     # 免费展示：优先挑选编号规范和正文格式的 error/warning（最抓眼球）
-    FREE_LIMIT = 3
+    FREE_LIMIT = 5
     priority_modules = ['编号规范', '正文格式', '标题层级', '图表规范']
     priority_issues = [i for i in issues
                        if i['module'] in priority_modules and i['severity'] in ('error', 'warning')]
@@ -936,13 +945,23 @@ if uploaded_file is not None and _can_check:
 
         if not unlocked:
             # 付费墙遮罩
+            hidden_errors = sum(1 for i in issues[FREE_LIMIT:] if i['severity'] == 'error')
+            hidden_warnings = sum(1 for i in issues[FREE_LIMIT:] if i['severity'] == 'warning')
+            urgency_parts = []
+            if hidden_errors > 0:
+                urgency_parts.append(f'<b style="color:#f87171;">{hidden_errors} 处严重错误</b>')
+            if hidden_warnings > 0:
+                urgency_parts.append(f'<b style="color:#fbbf24;">{hidden_warnings} 处格式警告</b>')
+            urgency_text = '、'.join(urgency_parts) if urgency_parts else f'{len(issues)-FREE_LIMIT} 条问题'
             st.markdown(f'''
             <div class="paywall">
                 <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
                 <div style="font-size:1.2rem;font-weight:700;color:var(--text-primary);margin-bottom:6px;">
-                    还有 {len(issues)-FREE_LIMIT} 条问题待查看</div>
-                <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:20px;">
-                    选择套餐解锁完整报告，查看全部问题的位置和修改建议</div>
+                    还有 {urgency_text} 未查看</div>
+                <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px;">
+                    这些问题可能导致盲审退回或答辩前被要求返工</div>
+                <div style="color:var(--text-muted);font-size:0.8rem;margin-bottom:20px;">
+                    解锁完整报告，查看每条问题的精确位置和修改建议</div>
             </div>''', unsafe_allow_html=True)
 
             st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
