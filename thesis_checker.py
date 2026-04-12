@@ -537,7 +537,7 @@ class ThesisChecker:
                                 f'{name}与其他节不一致',
                                 f'{ref_val/360000:.2f}cm',
                                 f'{cur_val/360000:.2f}cm', 'supplement')
-                            error_count += 0.5
+                            error_count += 0.7
 
         total_checks = max(total_checks, 1)
         score = max(0, 10 * (1 - error_count / total_checks))
@@ -620,7 +620,7 @@ class ThesisChecker:
             self._add_issue(module, 'warning', '封面', -1, '',
                 '未能从段落中检测到中文题目（可能在文本框中）', '应有中文题目',
                 '请人工确认题目字体是否为小二号黑体加粗', 'official')
-            error_count += 0.5
+            error_count += 0.7
 
         # ---- 检查必填字段（仅定制版对标具体字段）----
         if self._has_custom_rules:
@@ -655,7 +655,7 @@ class ThesisChecker:
                 if not found:
                     self._add_issue(module, 'warning', '封面', -1, '',
                         f'封面缺少"{field_name}"信息', f'应包含{field_name}', '未找到', 'official')
-                    error_count += 0.5
+                    error_count += 0.7
 
         # ---- 检查封面是否有填写占位符未替换 ----
         total_checks += 1
@@ -668,7 +668,7 @@ class ThesisChecker:
             self._add_issue(module, 'warning', '封面', -1, '',
                 f'封面有 {len(placeholders_found)} 处占位符未替换',
                 '应填写实际内容', f'发现: {placeholders_found[0]}...', 'official')
-            error_count += 0.5
+            error_count += 0.7
 
         total_checks = max(total_checks, 1)
         score = max(0, 10 * (1 - error_count / total_checks))
@@ -750,7 +750,7 @@ class ThesisChecker:
                             self._add_issue(module, 'warning', f'第{j+1}段(关键词)', j,
                                 text, '关键词之间应用分号分隔', '使用"；"分隔',
                                 '未检测到分号', 'supplement')
-                            error_count += 0.5
+                            error_count += 0.7
 
                         # 检查关键词数量
                         kws = re.split(r'[；;]', kw_content)
@@ -762,7 +762,7 @@ class ThesisChecker:
                                 text, f'关键词数量应为{kw_min}-{kw_max}个',
                                 f'{kw_min}-{kw_max}个',
                                 f'{len(kws)}个', 'official')
-                            error_count += 0.5
+                            error_count += 0.7
                     break
 
             if not kw_found:
@@ -819,12 +819,12 @@ class ThesisChecker:
                             self._add_issue(module, 'warning', f'第{j+1}段(Keywords)', j,
                                 text, '"Keywords"须加粗', '加粗',
                                 '未加粗', 'supplement')
-                            error_count += 0.5
+                            error_count += 0.7
                     break
             if not kw_en_found:
                 self._add_issue(module, 'warning', '英文摘要区域', en_idx, '',
                     '未找到Keywords', '应有Keywords行', '未找到', 'official')
-                error_count += 0.5
+                error_count += 0.7
         else:
             self._add_issue(module, 'error', '全文', -1, '',
                 '未找到英文摘要', '应包含Abstract', '未找到', 'official')
@@ -855,7 +855,7 @@ class ThesisChecker:
             has_toc_field = bool(self.doc.element.body.findall(
                 f'.//{{{W_NS}}}fldSimple[@{{{W_NS}}}instr]'))
             if has_toc_in_sdt or has_toc_field:
-                self.scores[module] = (6, 8)
+                self.scores[module] = (4, 8)  # Word自动生成目录仅给50%基线
                 return
             self._add_issue(module, 'error', '全文', -1, '',
                 '未找到目录', '应包含目录', '未找到', 'official')
@@ -1096,7 +1096,7 @@ class ThesisChecker:
 
         total_errors = font_errors + size_errors + spacing_errors + indent_errors
         checked_count = max(len(body_paras), 1)
-        error_rate = min(total_errors / checked_count, 1.0)
+        error_rate = min(total_errors / checked_count * 2.5, 1.0)  # 放大系数2.5，拉低正文得分
         score = max(0, 20 * (1 - error_rate))
         self.scores[module] = (round(score, 1), 20)
 
@@ -1184,7 +1184,7 @@ class ThesisChecker:
                             error_count += 1
 
         total_headings = max(total_headings, 1)
-        score = max(0, 12 * (1 - error_count / (total_headings * 2)))
+        score = max(0, 12 * (1 - error_count / total_headings))
         self.scores[module] = (round(score, 1), 12)
 
     # --------------------------------------------------------
@@ -1383,7 +1383,7 @@ class ThesisChecker:
                                 f'第{idx+1}段 [{section}]({caption_type})', idx, txt,
                                 f'{caption_type}字号不一致（多数为{pt_to_name(base_size)}）',
                                 pt_to_name(base_size), pt_to_name(s), 'supplement')
-                            error_count += 0.5
+                            error_count += 0.7
                 if len(caption_fonts) >= 2:
                     base_font = Counter(f for f, _, _ in caption_fonts).most_common(1)[0][0]
                     for f, idx, txt in caption_fonts:
@@ -1394,7 +1394,7 @@ class ThesisChecker:
                                 f'第{idx+1}段 [{section}]({caption_type})', idx, txt,
                                 f'{caption_type}字体不一致（多数为{base_font}）',
                                 base_font, f, 'supplement')
-                            error_count += 0.5
+                            error_count += 0.7
 
         total_checks = max(total_checks, 1)
         score = max(0, 10 * (1 - error_count / total_checks))
@@ -1495,7 +1495,7 @@ class ThesisChecker:
                         default_text,
                         f'{"奇数页" if even_odd_enabled else ""}页眉内容不符合规范，请核对学校要求',
                         ODD_HEADER_EXPECTED, default_text, 'official')
-                    error_count += 0.5
+                    error_count += 0.7
 
                 # 页眉居中检查
                 for p in header.paragraphs:
@@ -1505,7 +1505,7 @@ class ThesisChecker:
                             self._add_issue(module, 'warning', f'节{idx+1} {header_label}', -1,
                                 p.text.strip(), '页眉应居中', '居中',
                                 '非居中', 'supplement')
-                            error_count += 0.5
+                            error_count += 0.7
                         break
 
             # ---- 偶数页页眉（仅在开启奇偶页不同时检查）----
@@ -1523,7 +1523,7 @@ class ThesisChecker:
                         self._add_issue(module, 'warning', f'节{idx+1} 偶数页页眉', -1,
                             even_text, '偶数页页眉应为论文题目',
                             truncate(thesis_title, 40), truncate(even_text, 40), 'official')
-                        error_count += 0.5
+                        error_count += 0.7
 
         if total_checks == 0:
             total_checks = 1
@@ -1596,7 +1596,7 @@ class ThesisChecker:
                                 self._add_issue(module, 'warning', f'{sec_label} 页码', -1,
                                     page_num_text, '页码应居中显示', '居中',
                                     '非居中', 'supplement')
-                                error_count += 0.5
+                                error_count += 0.7
                             break
 
                     # 记录页码格式用于一致性检查
@@ -1618,7 +1618,7 @@ class ThesisChecker:
                 self._add_issue(module, 'warning', '全文页码', -1, '',
                     '正文各节页码格式不一致（部分阿拉伯数字，部分罗马数字）',
                     '格式统一', f'检测到{len(set(body_formats))}种格式', 'supplement')
-                error_count += 0.5
+                error_count += 0.7
 
         total_checks = max(total_checks, 1)
         score = max(0, 5 * (1 - error_count / total_checks))
@@ -1692,14 +1692,14 @@ class ThesisChecker:
                         f'外文文献应占{foreign_ratio:.0%}以上',
                         f'≥{int(total_refs * foreign_ratio)}篇外文',
                         f'{len(en_refs)}篇外文({en_ratio:.0%})', 'official')
-                    error_count += 0.5
+                    error_count += 0.7
 
         # 检查编号格式一致性：全部编号或全部不编号
         if numbered_refs > 0 and numbered_refs < total_refs * 0.7:
             self._add_issue(module, 'warning', '参考文献', ref_start, '',
                 '参考文献编号格式不一致（部分有编号，部分无编号）', '格式统一',
                 f'{numbered_refs}/{total_refs}条带编号', 'supplement')
-            error_count += 0.5
+            error_count += 0.7
         elif self._has_custom_rules and numbered_refs > total_refs * 0.3:
             self._add_issue(module, 'error', '参考文献', ref_start, '',
                 '参考文献不应编号，首行顶格写', '无编号',
@@ -1715,7 +1715,7 @@ class ThesisChecker:
                 self._add_issue(module, 'warning', '参考文献', ref_start, '',
                     '参考文献应中文在前，英文在后', '中文→英文',
                     '中英文交错排列', 'official')
-                error_count += 0.5
+                error_count += 0.7
 
         score = max(0, 5 * (1 - error_count / total_checks))
         self.scores[module] = (round(score, 1), 5)
@@ -1951,14 +1951,14 @@ class ThesisChecker:
                 self._add_issue(module, 'warning', f'图{num_key}', idx, '',
                     f'中文图{num_key}缺少对应的英文Fig.{num_key}',
                     f'Fig.{num_key}', '未找到', 'official')
-                error_count += 0.5
+                error_count += 0.7
         for num_key in en_fig_map:
             if num_key not in cn_fig_map:
                 idx = en_fig_map[num_key][0]
                 self._add_issue(module, 'warning', f'Fig.{num_key}', idx, '',
                     f'英文Fig.{num_key}缺少对应的中文图{num_key}',
                     f'图{num_key}', '未找到', 'official')
-                error_count += 0.5
+                error_count += 0.7
 
         # --- Fig 编号与图编号数字是否匹配（限制在正文范围内） ---
         total_checks += 1
@@ -2076,13 +2076,13 @@ class ThesisChecker:
                     f'摘要共{cn_char_count}字',
                     '硕士论文中文摘要约1000字', '约1000字',
                     f'{cn_char_count}字（偏少）', 'official')
-                error_count += 0.5
+                error_count += 0.7
             elif cn_char_count > abs_max:
                 self._add_issue(module, 'warning', '中文摘要', cn_idx,
                     f'摘要共{cn_char_count}字',
                     '硕士论文中文摘要约1000字', '约1000字',
                     f'{cn_char_count}字（偏多）', 'official')
-                error_count += 0.5
+                error_count += 0.7
 
         # ---- 2. 缩写首次全称检查 ----
         total_checks += 1
@@ -2175,7 +2175,7 @@ class ThesisChecker:
             self._add_issue(module, 'warning', '正文', -1, '',
                 '正文中参考文献引用偏少（应在引用处标注"(作者，年份)"）',
                 '多处引用标注', f'仅检测到约{cite_count}处', 'official')
-            error_count += 0.5
+            error_count += 0.7
 
         # ---- 4. 图表正文引用检查 ----
         total_checks += 1
@@ -2224,7 +2224,7 @@ class ThesisChecker:
                                 para.text.strip(),
                                 f'拉丁学名"{m.group()}"应使用斜体',
                                 '斜体', '正体', 'supplement')
-                            error_count += 0.5
+                            error_count += 0.7
 
         if non_italic_latin > 5:
             self._add_issue(module, 'info', '汇总', -1, '',
@@ -2248,7 +2248,7 @@ class ThesisChecker:
                             text.strip(),
                             '中文语境中应使用全角标点（，；：）而非半角（,;:）',
                             '全角标点', f'检测到半角: ...{m.group()}...', 'supplement')
-                        error_count += 0.5
+                        error_count += 0.7
 
         if half_punct_in_cn > 5:
             self._add_issue(module, 'info', '汇总', -1, '',
@@ -2303,6 +2303,19 @@ class ThesisChecker:
         raw_max = self.get_max_score()
         # 归一化到100分
         pct = (raw_total / raw_max * 100) if raw_max > 0 else 0
+
+        # 全局惩罚：错误/警告越多，额外扣分越多（激励用户修复）
+        error_count = sum(1 for i in self.issues if i.severity == 'error')
+        warning_count = sum(1 for i in self.issues if i.severity == 'warning')
+        penalty = 0
+        if error_count > 20: penalty += 8
+        elif error_count > 10: penalty += 4
+        elif error_count > 5: penalty += 2
+        if warning_count > 20: penalty += 5
+        elif warning_count > 10: penalty += 3
+        elif warning_count > 5: penalty += 1
+        pct = max(0, pct - penalty)
+
         score_100 = round(pct, 0)
 
         if pct >= 90: grade = 'A'
@@ -2386,12 +2399,23 @@ class ThesisChecker:
         raw_max = self.get_max_score()
         # 归一化到100分
         pct = (raw_total / raw_max * 100) if raw_max > 0 else 0
-        total = round(pct, 0)
-        max_total = 100
 
         # 统计
         error_count = sum(1 for i in self.issues if i.severity == 'error')
         warning_count = sum(1 for i in self.issues if i.severity == 'warning')
+
+        # 全局惩罚（与 get_report_data 保持一致）
+        penalty = 0
+        if error_count > 20: penalty += 8
+        elif error_count > 10: penalty += 4
+        elif error_count > 5: penalty += 2
+        if warning_count > 20: penalty += 5
+        elif warning_count > 10: penalty += 3
+        elif warning_count > 5: penalty += 1
+        pct = max(0, pct - penalty)
+
+        total = round(pct, 0)
+        max_total = 100
         info_count = sum(1 for i in self.issues if i.severity == 'info')
         official_count = sum(1 for i in self.issues if i.source == 'official')
         supplement_count = sum(1 for i in self.issues if i.source == 'supplement')
