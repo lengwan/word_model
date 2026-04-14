@@ -471,7 +471,29 @@ def render_issue(issue, show_suggestion=True):
 # ============================================================
 # 渲染模块卡片
 # ============================================================
-def render_module_card(mod):
+def render_module_card(mod, locked=False):
+    """渲染单个模块卡片。locked=True时隐藏具体分数，只显示模块名和锁"""
+    if locked:
+        # 锁定版：灰色环 + 问号，不泄露任何分数信息
+        r, sw = 22, 4
+        circ = 2 * 3.14159 * r
+        ring = f'''<svg width="52" height="52" viewBox="0 0 52 52" style="flex-shrink:0;">
+          <circle cx="26" cy="26" r="{r}" fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="{sw}"/>
+          <text x="26" y="30" text-anchor="middle" fill="#64748b" font-size="14" font-weight="800">?</text>
+        </svg>'''
+        return f'''<div class="glass-card" style="padding:14px 16px;opacity:0.6;">
+          <div style="display:flex;align-items:center;gap:12px;">
+            {ring}
+            <div style="flex:1;min-width:0;">
+              <div style="font-weight:600;font-size:0.88rem;margin-bottom:4px;">{mod['name']}</div>
+              <div style="width:100%;height:8px;background:rgba(255,255,255,0.06);border-radius:4px;overflow:hidden;">
+                <div style="width:0%;height:100%;border-radius:4px;"></div>
+              </div>
+              <div style="font-size:0.7rem;color:#64748b;margin-top:4px;">解锁查看</div>
+            </div>
+          </div>
+        </div>'''
+
     pct = mod['pct']
     if pct >= 90:   color, emoji = '#10b981', ''
     elif pct >= 70: color, emoji = '#3b82f6', ''
@@ -913,14 +935,47 @@ if uploaded_file is not None and _can_check:
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     # ========== 模块评分卡片网格 ==========
-    st.markdown("#### 各模块得分")
     mods = data['modules']
-    # 用 HTML grid 渲染（比 st.columns 更紧凑）
-    grid_html = '<div class="mod-grid">'
-    for mod in mods:
-        grid_html += render_module_card(mod)
-    grid_html += '</div>'
-    st.markdown(grid_html, unsafe_allow_html=True)
+    unlocked_mods = st.session_state.get('unlocked', False)
+
+    if unlocked_mods:
+        # 付费用户：显示完整模块分数
+        st.markdown("#### 各模块得分")
+        grid_html = '<div class="mod-grid">'
+        for mod in mods:
+            grid_html += render_module_card(mod)
+        grid_html += '</div>'
+        st.markdown(grid_html, unsafe_allow_html=True)
+    else:
+        # 免费用户：统计摘要 + 锁定卡片（不泄露具体哪个模块有问题）
+        pass_count = sum(1 for m in mods if m['pct'] >= 90)
+        warn_count = sum(1 for m in mods if 40 <= m['pct'] < 90)
+        fail_count = sum(1 for m in mods if m['pct'] < 40)
+        st.markdown("#### 14 个维度扫描完成")
+        summary_html = f'''<div style="display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap;">
+            <div class="glass-card" style="flex:1;min-width:120px;padding:16px;text-align:center;">
+                <div style="font-size:1.8rem;font-weight:800;color:#10b981;">{pass_count}</div>
+                <div style="font-size:0.8rem;color:var(--text-secondary);">维度通过</div>
+            </div>
+            <div class="glass-card" style="flex:1;min-width:120px;padding:16px;text-align:center;">
+                <div style="font-size:1.8rem;font-weight:800;color:#f59e0b;">{warn_count}</div>
+                <div style="font-size:0.8rem;color:var(--text-secondary);">需要改进</div>
+            </div>
+            <div class="glass-card" style="flex:1;min-width:120px;padding:16px;text-align:center;">
+                <div style="font-size:1.8rem;font-weight:800;color:#ef4444;">{fail_count}</div>
+                <div style="font-size:0.8rem;color:var(--text-secondary);">严重不足</div>
+            </div>
+        </div>'''
+        st.markdown(summary_html, unsafe_allow_html=True)
+
+        # 锁定的模块卡片网格
+        grid_html = '<div class="mod-grid">'
+        for mod in mods:
+            grid_html += render_module_card(mod, locked=True)
+        grid_html += '</div>'
+        st.markdown(grid_html, unsafe_allow_html=True)
+        st.markdown('<p style="text-align:center;font-size:0.82rem;color:#818cf8;margin-top:8px;">'
+            '🔒 解锁任意套餐，查看具体哪些维度不达标</p>', unsafe_allow_html=True)
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -929,7 +984,7 @@ if uploaded_file is not None and _can_check:
     st.markdown(f"#### 问题详情（共 {len(issues)} 条）")
 
     # 免费展示：优先挑选编号规范和正文格式的 error/warning（最抓眼球）
-    FREE_LIMIT = 5
+    FREE_LIMIT = 3
     priority_modules = ['编号规范', '正文格式', '标题层级', '图表规范']
     priority_issues = [i for i in issues
                        if i['module'] in priority_modules and i['severity'] in ('error', 'warning')]
