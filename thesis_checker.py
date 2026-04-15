@@ -247,10 +247,14 @@ def get_effective_bold(run, para):
 
 def get_effective_alignment(para):
     """获取段落有效对齐方式"""
-    if para.alignment is not None:
-        return para.alignment
-    if para.style and para.style.paragraph_format and para.style.paragraph_format.alignment is not None:
-        return para.style.paragraph_format.alignment
+    try:
+        if para.alignment is not None:
+            return para.alignment
+        if para.style and para.style.paragraph_format and para.style.paragraph_format.alignment is not None:
+            return para.style.paragraph_format.alignment
+    except (ValueError, KeyError):
+        # python-docx 遇到非标准 jc 值时会抛 ValueError
+        pass
     return None
 
 
