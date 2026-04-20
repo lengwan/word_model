@@ -120,6 +120,38 @@ DEFAULT_RULES = {
     "cover_fields": ["分类号", "UDC", "学科专业", "指导教师", "论文作者", "培养单位"],
 }
 
+# 本科论文相对硕士的规则差异（只列不同的字段）
+UNDERGRAD_OVERRIDES = {
+    "degree": "本科",
+    "abstract": {
+        "word_count_min": 200,   # 硕士 600，本科 200
+        "word_count_max": 800,   # 硕士 1500，本科 800
+        "keyword_count_min": 3,
+        "keyword_count_max": 5,
+    },
+    "references": {
+        "min_count": 15,         # 硕士 100，本科 15
+        "foreign_ratio": 0.1,    # 硕士 0.33，本科放宽到 10%
+        "cn_before_en": True,
+    },
+}
+
+
+def get_default_rules(degree='硕士'):
+    """根据学历返回默认规则字典。
+    degree: '本科' 或 '硕士'（默认 '硕士'）
+    """
+    if degree == '本科':
+        rules = copy.deepcopy(DEFAULT_RULES)
+        for k, v in UNDERGRAD_OVERRIDES.items():
+            if isinstance(v, dict) and k in rules and isinstance(rules[k], dict):
+                rules[k].update(v)
+            else:
+                rules[k] = v
+        return rules
+    return copy.deepcopy(DEFAULT_RULES)
+
+
 # ============================================================
 # 字体别名映射 & 工具函数
 # ============================================================
@@ -166,6 +198,7 @@ class Issue:
     expected: str        # 期望值
     actual: str          # 实际值
     source: str          # 'official' 或 'supplement'
+    fixable: bool = False  # 是否可自动修复
 
     @property
     def source_label(self):
@@ -457,11 +490,12 @@ class ThesisChecker:
             self._section_labels[i] = current_label
 
     def _add_issue(self, module, severity, location, para_index, text_preview,
-                   rule, expected, actual, source):
+                   rule, expected, actual, source, fixable=False):
         self.issues.append(Issue(
             module=module, severity=severity, location=location,
             para_index=para_index, text_preview=truncate(text_preview),
-            rule=rule, expected=expected, actual=actual, source=source
+            rule=rule, expected=expected, actual=actual, source=source,
+            fixable=fixable
         ))
 
     # --------------------------------------------------------
@@ -859,7 +893,13 @@ class ThesisChecker:
             has_toc_field = bool(self.doc.element.body.findall(
                 f'.//{{{W_NS}}}fldSimple[@{{{W_NS}}}instr]'))
             if has_toc_in_sdt or has_toc_field:
-                self.scores[module] = (4, 8)  # Word自动生成目录仅给50%基线
+                # Word 自动生成目录：跑条目交叉校验（子调用）
+                toc_issues = self._check_toc_cross_reference(is_auto=True)
+                error_count += toc_issues
+                total_checks += 2
+                base = 8 * (1 - error_count / max(total_checks, 1))
+                # 自动生成目录至少给 50% 基线，再扣 toc_issues 的分
+                self.scores[module] = (round(max(4 - toc_issues * 0.5, 0) + max(base - 4, 0), 1), 8)
                 return
             self._add_issue(module, 'error', '全文', -1, '',
                 '未找到目录', '应包含目录', '未找到', 'official')
@@ -897,8 +937,113 @@ class ThesisChecker:
                         error_count += 1
                     break
 
+        # ===== 新增：手写目录的条目交叉校验 =====
+        toc_issues = self._check_toc_cross_reference(is_auto=False, toc_start=toc_idx)
+        error_count += toc_issues
+        total_checks += 2
+
         score = max(0, 8 * (1 - error_count / total_checks))
         self.scores[module] = (round(score, 1), 8)
+
+    def _check_toc_cross_reference(self, is_auto=False, toc_start=None):
+        """目录交叉校验：目录条目 vs 实际文档章节标题对齐。
+        返回产生的错误计数。
+        python-docx 读不到真实页码（需 Word 渲染），但我们可以检测：
+          1. 目录条目的标题是否在正文中存在对应章节
+          2. 目录条目顺序与正文顺序是否一致
+          3. 手写目录的页码是否单调递增
+        """
+        module = '目录'
+        issues = 0
+        paras = self.doc.paragraphs
+
+        # 收集所有正文标题文本（用于对比）
+        body_start = self.markers.get('introduction') or 0
+        body_end = self.markers.get('references') or len(paras)
+        doc_headings = []  # [(idx, normalized_text)]
+        for i in range(body_start, min(body_end, len(paras))):
+            lvl = get_heading_level(paras[i])
+            if 0 < lvl <= 3:
+                txt = paras[i].text.strip()
+                # 归一化：去掉前导编号和空格，保留关键词
+                norm = re.sub(r'^[\d\.\s]+', '', txt).strip()
+                if norm:
+                    doc_headings.append((i, txt, norm))
+
+        if not doc_headings:
+            return 0  # 正文都没识别出标题，没法交叉校验
+
+        # 收集 TOC 条目
+        toc_entries = []  # [(toc_para_idx, title_norm, page_num_or_None)]
+        if is_auto:
+            # Word 自动目录：从 sdt 内容和 fldChar 包裹的 hyperlink 里抽取
+            sdt_texts = self._extract_sdt_texts()
+            # 每个 sdt 文本段落可能是一条 TOC 条目
+            toc_line_pat = re.compile(r'^(.+?)[\s\.·…\t]+(\d+)\s*$')
+            for t in sdt_texts:
+                # 目录条目通常形如 "1 引言 ....... 3"
+                for line in t.splitlines():
+                    line = line.strip()
+                    if not line or len(line) < 3 or line in ('目录', '目  录'):
+                        continue
+                    m = toc_line_pat.match(line)
+                    if m:
+                        title = re.sub(r'^[\d\.\s]+', '', m.group(1)).strip()
+                        if title:
+                            toc_entries.append((-1, title, int(m.group(2))))
+        else:
+            # 手写目录：从 toc_start 之后、到第一个正文标题之前的段落里解析
+            end_toc = body_start if body_start > toc_start else len(paras)
+            toc_line_pat = re.compile(r'^(.+?)[\s\.·…\t]+(\d+)\s*$')
+            for i in range(toc_start + 1, min(end_toc, len(paras))):
+                text = paras[i].text.strip()
+                if not text or text in ('目录', '目  录'):
+                    continue
+                m = toc_line_pat.match(text)
+                if m:
+                    title = re.sub(r'^[\d\.\s]+', '', m.group(1)).strip()
+                    if title:
+                        toc_entries.append((i, title, int(m.group(2))))
+
+        if not toc_entries:
+            # 没解析出条目且不是自动目录 - 可能目录格式完全自由
+            return 0
+
+        # 校验 1：目录条目应能在正文标题里找到
+        doc_heading_norms = set(h[2] for h in doc_headings)
+        missing_in_doc = []
+        for toc_i, title, page in toc_entries:
+            # 允许目录条目是正文标题的前缀或包含关系
+            if title not in doc_heading_norms and not any(
+                title in n or n in title for n in doc_heading_norms if len(n) >= 3):
+                missing_in_doc.append((toc_i, title, page))
+        if missing_in_doc:
+            for toc_i, title, page in missing_in_doc[:5]:
+                self._add_issue(module, 'warning',
+                    f'目录条目' if toc_i < 0 else f'第{toc_i+1}段',
+                    toc_i if toc_i >= 0 else -1, title,
+                    '目录中的条目在正文中未找到对应章节（可能章节被删/改名，目录未更新）',
+                    '目录与正文一致', '目录存在但正文缺失', 'supplement')
+            if len(missing_in_doc) > 5:
+                self._add_issue(module, 'warning', '目录', -1, '',
+                    f'共 {len(missing_in_doc)} 条目录条目在正文中找不到对应章节（仅列前 5 条）',
+                    '全部条目与正文一致', f'{len(missing_in_doc)} 条不一致', 'supplement')
+            issues += min(len(missing_in_doc) * 0.2, 1.0)
+
+        # 校验 2：目录页码应单调递增（手写目录才有意义）
+        if not is_auto:
+            pages = [p for _, _, p in toc_entries if p is not None]
+            non_monotonic = 0
+            for j in range(len(pages) - 1):
+                if pages[j] > pages[j + 1]:
+                    non_monotonic += 1
+            if non_monotonic > 0:
+                self._add_issue(module, 'warning', '目录', -1, '',
+                    f'目录页码不是递增的（发现 {non_monotonic} 处逆序），目录可能需要重新更新',
+                    '页码递增', f'{non_monotonic} 处逆序', 'supplement')
+                issues += 0.5
+
+        return issues
 
     # --------------------------------------------------------
     # 检查模块 5: 正文格式
@@ -1009,6 +1154,19 @@ class ThesisChecker:
             en_font_counter = Counter()
             spacing_counter = Counter()
             indent_counter = Counter()
+            space_before_counter = Counter()
+            space_after_counter = Counter()
+            widow_false = 0
+            widow_total = 0
+
+            def _fmt_pt(v):
+                """把段前段后距离格式化为 pt 数值（None 返回 None）"""
+                if v is None:
+                    return None
+                try:
+                    return round(v.pt, 1)
+                except Exception:
+                    return None
 
             for i, para in body_paras:
                 line_sp = get_effective_line_spacing(para)
@@ -1018,6 +1176,19 @@ class ThesisChecker:
                 indent_cm = get_effective_first_indent(para)
                 if indent_cm is not None:
                     indent_counter[round(indent_cm, 2)] += 1
+
+                pf = para.paragraph_format
+                sb = _fmt_pt(pf.space_before)
+                sa = _fmt_pt(pf.space_after)
+                if sb is not None:
+                    space_before_counter[sb] += 1
+                if sa is not None:
+                    space_after_counter[sa] += 1
+                # widow_control=False 意味着"允许孤行寡行" — 应为 True
+                if pf.widow_control is not None:
+                    widow_total += 1
+                    if pf.widow_control is False:
+                        widow_false += 1
 
                 for run in para.runs:
                     run_text = run.text.strip()
@@ -1042,6 +1213,35 @@ class ThesisChecker:
             base_en_font = en_font_counter.most_common(1)[0][0] if en_font_counter else None
             base_spacing = spacing_counter.most_common(1)[0][0] if spacing_counter else None
             base_indent = indent_counter.most_common(1)[0][0] if indent_counter else None
+            base_sb = space_before_counter.most_common(1)[0][0] if space_before_counter else None
+            base_sa = space_after_counter.most_common(1)[0][0] if space_after_counter else None
+
+            # ===== 新增：段前段后间距一致性（聚合报警） =====
+            total_with_sb = sum(space_before_counter.values())
+            if total_with_sb > 5 and base_sb is not None:
+                deviant_sb = total_with_sb - space_before_counter[base_sb]
+                if deviant_sb / max(total_with_sb, 1) > 0.1:
+                    self._add_issue(module, 'warning', '全文正文', -1, '',
+                        f'正文段前间距不一致（{deviant_sb}/{total_with_sb} 段偏离众数 {base_sb}pt）',
+                        f'统一为 {base_sb}pt',
+                        f'{deviant_sb} 段偏离', 'supplement')
+                    spacing_errors += min(deviant_sb * 0.1, 3)
+            total_with_sa = sum(space_after_counter.values())
+            if total_with_sa > 5 and base_sa is not None:
+                deviant_sa = total_with_sa - space_after_counter[base_sa]
+                if deviant_sa / max(total_with_sa, 1) > 0.1:
+                    self._add_issue(module, 'warning', '全文正文', -1, '',
+                        f'正文段后间距不一致（{deviant_sa}/{total_with_sa} 段偏离众数 {base_sa}pt）',
+                        f'统一为 {base_sa}pt',
+                        f'{deviant_sa} 段偏离', 'supplement')
+                    spacing_errors += min(deviant_sa * 0.1, 3)
+
+            # ===== 新增：孤行寡行控制（widow_control） =====
+            if widow_total > 5 and widow_false / widow_total > 0.3:
+                self._add_issue(module, 'warning', '全文正文', -1, '',
+                    f'{widow_false}/{widow_total} 段关闭了"孤行寡行控制"，可能导致段落被迫跨页留单行',
+                    '全部开启孤行寡行控制', f'{widow_false} 段未开', 'supplement')
+                spacing_errors += 1
 
             # 第二遍：报告偏离基准的段落
             for i, para in body_paras:
@@ -1100,7 +1300,9 @@ class ThesisChecker:
 
         total_errors = font_errors + size_errors + spacing_errors + indent_errors
         checked_count = max(len(body_paras), 1)
-        error_rate = min(total_errors / checked_count * 2.5, 1.0)  # 放大系数2.5，拉低正文得分
+        # 放大系数 1.5 折中：既降误报（原 2.5 会把公式/代码段冤杀至 0 分），
+        # 又保留付费墙压力（纯 1.0 会让烂本也能拿 12/20，付费动力不足）
+        error_rate = min(total_errors / checked_count * 1.5, 1.0)
         score = max(0, 20 * (1 - error_rate))
         self.scores[module] = (round(score, 1), 20)
 
@@ -1120,8 +1322,9 @@ class ThesisChecker:
         error_count = 0
         total_headings = 0
 
-        # 收集所有标题信息
+        # 收集所有标题信息（按 level 分桶 + 顺序序列两套结构）
         headings_by_level = {1: [], 2: [], 3: []}  # level -> [(para_idx, text, size_pt, font)]
+        heading_sequence = []  # 文档顺序: [(para_idx, text, level)]
         for i in range(start, min(end, len(paras))):
             para = paras[i]
             level = get_heading_level(para)
@@ -1138,6 +1341,29 @@ class ThesisChecker:
                 ea_font = get_east_asian_font(run)
                 break
             headings_by_level[level].append((i, text, size_pt, ea_font))
+            heading_sequence.append((i, text, level))
+
+        # ===== 新增：标题层级序列检查（跳级 / 首个标题应为1级） =====
+        if heading_sequence:
+            # 第一个标题应该是 1 级（引言之后的第一个应是"1 引言"或类似）
+            first_idx, first_text, first_level = heading_sequence[0]
+            if first_level != 1:
+                self._add_issue(module, 'warning',
+                    f'第{first_idx+1}段', first_idx, first_text,
+                    f'正文第一个标题应为一级标题，当前为 {first_level} 级',
+                    '1 级标题（章）', f'{first_level} 级标题', 'annotation')
+                error_count += 1
+
+            # 跳级检查：相邻标题不应跨级（允许回退和同级）
+            prev_level = first_level
+            for i, text, level in heading_sequence[1:]:
+                if level - prev_level > 1:
+                    self._add_issue(module, 'error',
+                        f'第{i+1}段', i, text,
+                        f'标题层级跳级：从 {prev_level} 级直接跳到 {level} 级（中间缺 {prev_level+1} 级）',
+                        f'{prev_level+1} 级标题', f'{level} 级（跳级）', 'supplement')
+                    error_count += 1
+                prev_level = level
 
         if self._has_custom_rules:
             # ===== 定制版：对标具体规则 =====
@@ -1721,6 +1947,79 @@ class ThesisChecker:
                     '中英文交错排列', 'official')
                 error_count += 0.7
 
+        # ===== 新增：GB/T 7714-2015 条目格式检查（含文献类型标识、年份、期刊页码） =====
+        if ref_entries:
+            total_checks += 3
+            # 常见文献类型标识符
+            type_pat = re.compile(r'\[(J|M|D|C|S|P|N|G|EB/OL|DB/OL|J/OL|M/OL)\]')
+            # 4 位年份（1900-2026）
+            year_pat = re.compile(r'(?<!\d)(19\d{2}|20[0-2]\d)(?!\d)')
+            # 期刊页码：, 年, 卷(期): 页  或  , 年, 卷: 页
+            journal_vol_pat = re.compile(r',\s*(19\d{2}|20[0-2]\d)\s*,\s*\d+\s*(\(\s*\d+\s*\))?\s*:\s*\d+')
+
+            missing_type = []
+            missing_year = []
+            journal_bad_vol = []
+            bad_punct = []
+
+            for idx, text in ref_entries:
+                # 去掉开头的 [n] 或 n. 编号
+                body = re.sub(r'^\[\d+\]\s*|^\d+[\.\)]\s+', '', text)
+
+                # 1. 缺文献类型标识
+                m_type = type_pat.search(body)
+                if not m_type:
+                    missing_type.append((idx, text))
+                    continue
+                doc_type = m_type.group(1)
+
+                # 2. 缺年份
+                if not year_pat.search(body):
+                    missing_year.append((idx, text))
+
+                # 3. 期刊条目要有卷期页
+                if doc_type == 'J':
+                    if not journal_vol_pat.search(body):
+                        journal_bad_vol.append((idx, text))
+
+                # 4. 常见标点错用：作者与题名间、题名与类型标识间应为英文句点
+                # 粗检：[J] 前应有 . 或句末
+                lit_before_type = body[:m_type.start()]
+                if lit_before_type and lit_before_type[-1] not in '.。 ':
+                    bad_punct.append((idx, text))
+
+            # 分别上报（避免单条刷屏，按"超过 N 条才报聚合错误"）
+            if missing_type:
+                for idx, text in missing_type[:5]:
+                    self._add_issue(module, 'warning', f'第{idx+1}段', idx, text,
+                        '参考文献缺少文献类型标识符（GB/T 7714 要求 [J]/[M]/[D]/[C] 等）',
+                        '含 [J]/[M]/[D]/[C]/[EB/OL] 等标识', '缺失', 'official')
+                if len(missing_type) > 5:
+                    self._add_issue(module, 'warning', '参考文献', ref_start, '',
+                        f'共 {len(missing_type)} 条参考文献缺少文献类型标识（仅列前 5 条，其余请自行排查）',
+                        '全部条目带类型标识', f'{len(missing_type)} 条缺失', 'official')
+                error_count += min(len(missing_type) * 0.2, 1.0)
+
+            if missing_year:
+                for idx, text in missing_year[:3]:
+                    self._add_issue(module, 'warning', f'第{idx+1}段', idx, text,
+                        '参考文献缺少出版年份', '应含 4 位年份', '未检出', 'official')
+                error_count += min(len(missing_year) * 0.3, 1.0)
+
+            if journal_bad_vol:
+                for idx, text in journal_bad_vol[:5]:
+                    self._add_issue(module, 'warning', f'第{idx+1}段', idx, text,
+                        '期刊论文条目缺少"卷(期):页"格式',
+                        '年, 卷(期): 页', '未检出完整卷期页', 'official')
+                error_count += min(len(journal_bad_vol) * 0.2, 1.0)
+
+            if bad_punct:
+                # 只给一条聚合信息，避免噪音
+                self._add_issue(module, 'info', '参考文献', ref_start, '',
+                    f'参考文献条目中 {len(bad_punct)} 条在文献类型标识前标点可疑（GB/T 7714 规定前应为英文句点）',
+                    '作者. 题名[J]. 刊名', '检测到空格或非句点', 'supplement')
+                # 仅 info 级不扣分
+
         score = max(0, 5 * (1 - error_count / total_checks))
         self.scores[module] = (round(score, 1), 5)
 
@@ -1854,11 +2153,13 @@ class ThesisChecker:
         cn_tabs = []
         en_tabs = []
 
-        # 正则加 \b 或后续字符限制，防止匹配 "图1.jpg" 之类的文本
-        fig_cn_pat = re.compile(r'^图\s*(\d[\d\-\.]*)(?:\s|$|[^\.\w])')
-        fig_en_pat = re.compile(r'^Fig\.?\s*(\d[\d\-\.]*)', re.IGNORECASE)
-        tab_cn_pat = re.compile(r'^表\s*(\d[\d\-\.]*)(?:\s|$|[^\.\w])')
-        tab_en_pat = re.compile(r'^Table\s*(\d[\d\-\.]*)', re.IGNORECASE)
+        # 编号捕获：要求数字段落呈现 "N" 或 "N-M" / "N.M" 结构，末尾必须不是数字/连字符/点
+        # （否则原来的 (?:\s|$|[^\.\w]) 在 Unicode 模式下会把中文当成 \w 触发回溯，
+        #  导致 "表2-3xxx" 被错误截断为 "表2"，章节式编号全部变成伪重复。参见 bug 修复记录）
+        fig_cn_pat = re.compile(r'^图\s*(\d+(?:[-\.]\d+)*)(?![\d\-\.])')
+        fig_en_pat = re.compile(r'^Fig\.?\s*(\d+(?:[-\.]\d+)*)(?![\d\-\.])', re.IGNORECASE)
+        tab_cn_pat = re.compile(r'^表\s*(\d+(?:[-\.]\d+)*)(?![\d\-\.])')
+        tab_en_pat = re.compile(r'^Table\s*(\d+(?:[-\.]\d+)*)(?![\d\-\.])', re.IGNORECASE)
         missing_num_pat = re.compile(r'^(图|表|Fig|Table)\s*[-—]{1,}')
 
         for i in range(start, end):
@@ -1978,6 +2279,44 @@ class ThesisChecker:
                         f'中英文图号不匹配：图{cn_num}对应的Fig编号为{m.group(1)}',
                         f'Fig.{cn_num}', f'Fig.{m.group(1)}', 'supplement')
                     error_count += 1
+
+        # --- 新增：公式编号连续性（理工科论文高频扣分点） ---
+        # 公式编号形如 "(1-1)" "(1.1)" "(式 1-1)"，通常独立成段或出现在段落末尾
+        total_checks += 1
+        eq_pats = [
+            re.compile(r'(?<!\d)\((?:式\s*)?(\d+(?:[-\.]\d+)*)\)\s*$'),  # 段末 (1-1) 或 (式 1-1)
+            re.compile(r'^\s*(?:式\s*)?\((\d+(?:[-\.]\d+)*)\)\s*$'),       # 独立一段 (1-1)
+        ]
+        eq_nums = []  # [(num_str, para_idx, text)]
+        for i in range(start, end):
+            text = paras[i].text.strip()
+            if not text or len(text) < 2:
+                continue
+            # 排除图表号与引用（图 2-1 / Fig. 2-1 / 文献编号 [1]）
+            if re.match(r'^(图|表|Fig|Table)\s*\d', text):
+                continue
+            if re.match(r'^\s*\[\d+\]', text):
+                continue
+            for pat in eq_pats:
+                m = pat.search(text)
+                if m:
+                    eq_nums.append((m.group(1), i, text[:80]))
+                    break
+        if eq_nums:
+            pure_nums = []
+            chapter_eqs = {}
+            for num_str, idx, txt in eq_nums:
+                parsed = self._parse_num_str(num_str)
+                if parsed is None:
+                    continue
+                ch, seq = parsed
+                if ch is None:
+                    pure_nums.append((seq, idx, txt))
+                else:
+                    chapter_eqs.setdefault(ch, []).append((seq, idx, txt))
+            error_count = self._check_seq_continuity(module, '式', pure_nums, error_count)
+            for ch, items in chapter_eqs.items():
+                error_count = self._check_seq_continuity(module, f'式{ch}-', items, error_count)
 
         total_checks = max(total_checks, 1)
         score = max(0, 8 * (1 - error_count / max(total_checks, 1)))
@@ -2363,6 +2702,7 @@ class ThesisChecker:
                 'actual': i.actual,
                 'source': i.source,
                 'source_label': i.source_label,
+                'fixable': i.fixable,
             })
 
         return {
@@ -2377,6 +2717,7 @@ class ThesisChecker:
             'error_count': sum(1 for i in self.issues if i.severity == 'error'),
             'warning_count': sum(1 for i in self.issues if i.severity == 'warning'),
             'info_count': sum(1 for i in self.issues if i.severity == 'info'),
+            'fixable_count': sum(1 for i in self.issues if i.fixable),
             'modules': modules,
             'issues': issues,
         }
