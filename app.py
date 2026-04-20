@@ -14,7 +14,7 @@ import random
 import html as html_mod
 import subprocess
 from datetime import datetime
-from thesis_checker import ThesisChecker, DEFAULT_RULES, merge_rules
+from thesis_checker import ThesisChecker, DEFAULT_RULES, merge_rules, get_default_rules
 
 # ============================================================
 # 页面配置
@@ -300,10 +300,10 @@ button[kind="primary"], .stButton > button[data-testid="stBaseButton-primary"] {
 # 套餐权限配置
 # ============================================================
 TIER_CONFIG = {
-    'lite':   {'recheck_limit': 0,  'issue_limit': 5,  'show_suggestion': False, 'show_filter': False, 'can_download': False, 'rules_view': False, 'rules_edit': False, 'ai_parse': False},
-    'basic':  {'recheck_limit': 3,  'issue_limit': -1, 'show_suggestion': False, 'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': False, 'ai_parse': False},
-    'pro':    {'recheck_limit': -1, 'issue_limit': -1, 'show_suggestion': True,  'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': True,  'ai_parse': False},
-    'custom': {'recheck_limit': -1, 'issue_limit': -1, 'show_suggestion': True,  'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': True,  'ai_parse': True},
+    'lite':   {'recheck_limit': 0,  'issue_limit': 5,  'show_suggestion': False, 'show_filter': False, 'can_download': False, 'rules_view': False, 'rules_edit': False, 'auto_fix': False},
+    'basic':  {'recheck_limit': 3,  'issue_limit': -1, 'show_suggestion': False, 'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': False, 'auto_fix': False},
+    'pro':    {'recheck_limit': -1, 'issue_limit': -1, 'show_suggestion': True,  'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': True,  'auto_fix': False},
+    'fix':    {'recheck_limit': -1, 'issue_limit': -1, 'show_suggestion': True,  'show_filter': True,  'can_download': True,  'rules_view': True,  'rules_edit': True,  'auto_fix': True},
 }
 
 def _get_tier_config():
@@ -312,17 +312,42 @@ def _get_tier_config():
     return TIER_CONFIG.get(tier, TIER_CONFIG['basic'])
 
 # ============================================================
-# 兑换码管理（文件锁 + 会话绑定）
+# 兑换码管理（SQLite + 原子事务 + 会话绑定）
+#
+# 迁移说明：原来用 codes.json + 文件锁，存在两个问题：
+#   1. Streamlit Cloud 实例重启会丢失 codes.json（临时文件系统）
+#   2. TOCTOU 竞争：兑换码泄露给同学时，多个浏览器可同时尝试使用
+# 改用 SQLite：
+#   - WAL 模式支持并发读写
+#   - BEGIN IMMEDIATE + UPDATE ... WHERE used=0 保证原子抢占
+#   - 启动时自动迁移旧 codes.json
+# TODO(持久化): Streamlit Cloud 免费版文件系统仍为临时，真正持久化需接
+#   Supabase / Neon / GitHub Gist API。接口已抽象成 load_codes/save_codes/
+#   verify_code/generate_codes，切换只需替换实现。
 # ============================================================
-CODES_FILE = os.path.join(os.path.dirname(__file__), 'codes.json')
-LOCK_FILE = CODES_FILE + '.lock'
+import sqlite3
+
+# codes.db 路径：Streamlit Cloud 上 __file__ 所在目录通常是 /mount/src/ 只读挂载，
+# 落在那里会在冷启动 sqlite3.connect 就报 "unable to open database file"。
+# 优先级：环境变量 CODES_DB_PATH > 系统临时目录 > 源码目录（本地开发兜底）
+_CODES_DB_ENV = os.environ.get('CODES_DB_PATH')
+if _CODES_DB_ENV:
+    CODES_DB = _CODES_DB_ENV
+else:
+    _src_dir = os.path.dirname(__file__)
+    _tmp_candidate = os.path.join(_src_dir, 'codes.db')
+    # 尝试在源码目录创建文件，失败则落到系统临时目录
+    try:
+        with open(_tmp_candidate, 'a'):
+            pass
+        CODES_DB = _tmp_candidate
+    except (OSError, PermissionError):
+        CODES_DB = os.path.join(tempfile.gettempdir(), 'fhy_word_codes.db')
+
+CODES_FILE = os.path.join(os.path.dirname(__file__), 'codes.json')  # legacy
 ADMIN_PWD = "8811925123Aa!"
 
 import uuid
-if os.name != 'nt':
-    import fcntl
-else:
-    import msvcrt
 
 def _get_session_id():
     """每个浏览器会话生成唯一 ID（存在 session_state 中，刷新不变）"""
@@ -330,80 +355,160 @@ def _get_session_id():
         st.session_state['session_id'] = str(uuid.uuid4())[:8]
     return st.session_state['session_id']
 
-def _locked_read_write(fn):
-    """带文件锁的读写操作，防止多用户并发写入冲突"""
-    import functools
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        if os.name == 'nt':
-            # Windows: 用临时锁文件 + 重试
-            for _ in range(10):
-                try:
-                    lock_fd = open(LOCK_FILE, 'w')
-                    msvcrt.locking(lock_fd.fileno(), 1, 1)  # LK_NBLCK
-                    try:
-                        return fn(*args, **kwargs)
-                    finally:
-                        msvcrt.locking(lock_fd.fileno(), 0, 1)  # unlock
-                        lock_fd.close()
-                except (OSError, IOError):
-                    time.sleep(0.1)
-            raise OSError("无法获取文件锁，请稍后重试")
-        else:
-            # Linux/Mac: fcntl 文件锁
-            lock_fd = open(LOCK_FILE, 'w')
+def _db():
+    """打开 SQLite 连接，启用 WAL 并设置超时"""
+    conn = sqlite3.connect(CODES_DB, timeout=10, isolation_level=None)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA synchronous=NORMAL')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def _init_codes_db():
+    """初始化表结构；若存在旧版 codes.json 则一次性迁移并备份"""
+    conn = _db()
+    try:
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS codes (
+                code TEXT PRIMARY KEY,
+                tier TEXT,
+                used INTEGER DEFAULT 0,
+                created TEXT,
+                used_at TEXT,
+                session TEXT,
+                report_id TEXT,
+                filename TEXT
+            )
+        ''')
+        # 迁移旧 codes.json（只做一次，迁移后改名为 .migrated 防止重复）
+        if os.path.exists(CODES_FILE):
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_EX)
-                return fn(*args, **kwargs)
-            finally:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                lock_fd.close()
-    return wrapper
+                with open(CODES_FILE, 'r', encoding='utf-8') as f:
+                    legacy = json.load(f)
+                for code, info in legacy.items():
+                    conn.execute('''INSERT OR IGNORE INTO codes
+                        (code, tier, used, created, used_at, session, report_id, filename)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (
+                        code,
+                        info.get('tier', 'basic'),
+                        1 if info.get('used') else 0,
+                        info.get('created'),
+                        info.get('used_at'),
+                        info.get('session'),
+                        info.get('report_id'),
+                        info.get('filename'),
+                    ))
+                # 用 os.replace 而非 rename，避免 Windows 多进程下 .migrated 已存在时抛错
+                os.replace(CODES_FILE, CODES_FILE + '.migrated')
+            except Exception:
+                # 迁移失败不致命，保留 codes.json 供下次重试
+                pass
+    finally:
+        conn.close()
+
+_init_codes_db()
 
 def load_codes():
-    if os.path.exists(CODES_FILE):
-        with open(CODES_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {}
+    """返回 dict 形式的全部兑换码，兼容旧接口"""
+    conn = _db()
+    try:
+        rows = conn.execute('SELECT * FROM codes').fetchall()
+        return {
+            r['code']: {
+                'tier': r['tier'],
+                'used': bool(r['used']),
+                'created': r['created'],
+                'used_at': r['used_at'],
+                'session': r['session'],
+                'report_id': r['report_id'],
+                'filename': r['filename'],
+            } for r in rows
+        }
+    finally:
+        conn.close()
 
 def save_codes(codes):
-    with open(CODES_FILE, 'w', encoding='utf-8') as f:
-        json.dump(codes, f, ensure_ascii=False, indent=2)
+    """逐条 upsert，保留签名以兼容现有调用。
+    注意：不再做 DELETE-then-INSERT 的整体覆盖，避免与 verify_code / generate_codes
+    的并发操作之间丢数据（worker B 的旧快照保存会覆盖 worker A 刚写入的新码）。"""
+    conn = _db()
+    try:
+        conn.execute('BEGIN')
+        for code, info in codes.items():
+            conn.execute('''INSERT OR REPLACE INTO codes
+                (code, tier, used, created, used_at, session, report_id, filename)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', (
+                code,
+                info.get('tier', 'basic'),
+                1 if info.get('used') else 0,
+                info.get('created'),
+                info.get('used_at'),
+                info.get('session'),
+                info.get('report_id'),
+                info.get('filename'),
+            ))
+        conn.execute('COMMIT')
+    except Exception:
+        try: conn.execute('ROLLBACK')
+        except Exception: pass
+        raise
+    finally:
+        conn.close()
 
-@_locked_read_write
 def verify_code(code, report_id=None, filename=None):
-    """验证兑换码并绑定到当前会话和报告"""
-    codes = load_codes()
+    """原子性兑换：BEGIN IMMEDIATE + UPDATE WHERE used=0，防止同码多人抢用"""
     code = code.strip().upper()
-    if code in codes:
-        if codes[code]['used']:
+    conn = _db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT used FROM codes WHERE code = ?', (code,)).fetchone()
+        if row is None:
+            conn.execute('ROLLBACK')
+            return False, '兑换码无效'
+        if row['used']:
+            conn.execute('ROLLBACK')
             return False, '此兑换码已被使用'
-        codes[code]['used'] = True
-        codes[code]['used_at'] = datetime.now().isoformat()
-        codes[code]['session'] = _get_session_id()
-        if report_id:
-            codes[code]['report_id'] = report_id
-        if filename:
-            codes[code]['filename'] = filename
-        save_codes(codes)
+        # 原子更新：UPDATE 返回影响行数，若为 0 说明被别人抢先
+        cur = conn.execute('''UPDATE codes
+            SET used = 1, used_at = ?, session = ?, report_id = ?, filename = ?
+            WHERE code = ? AND used = 0''', (
+            datetime.now().isoformat(),
+            _get_session_id(),
+            report_id,
+            filename,
+            code,
+        ))
+        if cur.rowcount == 0:
+            conn.execute('ROLLBACK')
+            return False, '此兑换码已被使用'
+        conn.execute('COMMIT')
         return True, '解锁成功'
-    return False, '兑换码无效'
+    except Exception as e:
+        try: conn.execute('ROLLBACK')
+        except Exception: pass
+        return False, f'验证失败：{e}'
+    finally:
+        conn.close()
 
-@_locked_read_write
 def load_codes_safe():
-    """带文件锁的读取，用于管理员面板等需要一致性的场景"""
+    """保留原签名，SQLite 读取本身一致，直接复用 load_codes"""
     return load_codes()
 
-@_locked_read_write
 def generate_codes(n=20, tier='basic'):
-    codes = load_codes()
+    """批量生成兑换码（码重复时自动跳过）"""
     new_codes = []
-    for _ in range(n):
-        code = f"FMT-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}"
-        if code not in codes:
-            codes[code] = {'tier': tier, 'used': False, 'created': datetime.now().isoformat()}
-            new_codes.append(code)
-    save_codes(codes)
+    conn = _db()
+    try:
+        for _ in range(n):
+            code = f"FMT-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}-{''.join(random.choices(string.ascii_uppercase + string.digits, k=4))}"
+            try:
+                conn.execute('''INSERT INTO codes (code, tier, used, created)
+                    VALUES (?, ?, 0, ?)''',
+                    (code, tier, datetime.now().isoformat()))
+                new_codes.append(code)
+            except sqlite3.IntegrityError:
+                pass  # 极小概率撞码，跳过
+    finally:
+        conn.close()
     return new_codes
 
 # ============================================================
@@ -676,7 +781,7 @@ def _render_admin_panel():
             with col_a:
                 gen_n = st.number_input("生成数量", min_value=1, max_value=100, value=10)
             with col_b:
-                gen_tier = st.selectbox("套餐", ['lite', 'basic', 'pro', 'custom'])
+                gen_tier = st.selectbox("套餐", ['lite', 'basic', 'pro', 'fix'])
             if st.button("生成兑换码", use_container_width=True):
                 new_codes = generate_codes(gen_n, gen_tier)
                 st.code('\n'.join(new_codes))
@@ -695,22 +800,53 @@ def _render_admin_panel():
 # ---- 主页面 ----
 # ============================================================
 
+# 倒计时 banner（基于答辩典型日期 5/31 估算，用户可忽略）
+_today = datetime.now()
+_defense_dates = {'研究生': datetime(_today.year, 5, 31), '本科': datetime(_today.year, 6, 15)}
+_default_defense = _defense_dates[st.session_state.get('edu_level', '研究生')]
+if _default_defense < _today:
+    _default_defense = _default_defense.replace(year=_today.year + 1)
+_days_to_defense = (_default_defense - _today).days
+if 0 < _days_to_defense <= 90:
+    st.markdown(f'''
+    <div style="background:linear-gradient(90deg,rgba(239,68,68,0.12),rgba(234,179,8,0.12));
+        border:1px solid rgba(239,68,68,0.3);border-radius:10px;
+        padding:10px 18px;margin:12px 0;text-align:center;font-size:0.88rem;
+        color:var(--text-primary);">
+        ⏳ 距离典型毕业答辩日期（{_default_defense.strftime('%m月%d日')}）还剩
+        <b style="color:#ef4444;font-size:1.1rem;">{_days_to_defense}</b> 天
+        &nbsp;·&nbsp; 平均修改需 4-8 小时，现在查比答辩前一晚强
+    </div>
+    ''', unsafe_allow_html=True)
+
 # Hero
 st.markdown('''
 <div class="hero">
     <h1>论文格式一键体检</h1>
-    <p>盲审不挂格式分 · 答辩不被打回改 · 5分钟查出125项问题</p>
+    <p>本科 / 研究生毕业论文通用 · 答辩前最后一道关 · 5分钟出体检报告</p>
     <div class="highlights">
-        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">125项</div><div class="hl-label">深度检查</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">30+</div><div class="hl-label">答辩高频扣分雷区</div></div>
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">14大</div><div class="hl-label">模块全覆盖</div></div>
         <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">5分钟</div><div class="hl-label">出报告</div></div>
-        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">盲审级</div><div class="hl-label">严格标准</div></div>
+        <div class="hl-item"><div class="hl-num" style="color:#3b82f6;">Beta版</div><div class="hl-label">不吹"全查"</div></div>
     </div>
 </div>
 ''', unsafe_allow_html=True)
 
-# 上传区
+# 学历切换 + 上传区
 st.markdown('<div class="upload-zone">', unsafe_allow_html=True)
+
+# 学历档位（影响参考文献数量、摘要字数等规则）
+col_edu1, col_edu2 = st.columns([1, 4])
+with col_edu1:
+    st.markdown('<div style="padding-top:8px;font-size:0.9rem;color:#94a3b8;">学历档位：</div>',
+        unsafe_allow_html=True)
+with col_edu2:
+    edu_level = st.radio("学历档位", ['研究生', '本科'],
+        index=0, horizontal=True, label_visibility="collapsed",
+        help="本科论文和研究生论文在参考文献数量、摘要字数等要求上不同")
+st.session_state['edu_level'] = edu_level
+
 col_up, col_title = st.columns([3, 2])
 with col_up:
     uploaded_file = st.file_uploader("上传论文 (.docx / .doc)", type=['docx', 'doc'],
@@ -720,7 +856,21 @@ with col_title:
         placeholder="如：基于深度学习的小麦病害图像识别研究",
         label_visibility="collapsed")
 st.markdown('</div>', unsafe_allow_html=True)
-st.markdown('<p style="text-align:center;font-size:0.9rem;color:#94a3b8;margin:8px 0 16px;">已帮助 2,400+ 同学通过格式审查 · 不准确全额退款</p>', unsafe_allow_html=True)
+
+# 3 条信任钩子（替换掉之前的"2400+"自吹数字）
+st.markdown('''
+<div style="display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin:12px 0 20px;font-size:0.82rem;">
+    <div style="padding:6px 12px;background:rgba(59,130,246,0.08);border:1px solid rgba(59,130,246,0.25);border-radius:20px;color:var(--text-secondary);">
+        🔒 文件仅在内存中解析，24 小时自动删除，不用于训练 AI
+    </div>
+    <div style="padding:6px 12px;background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:20px;color:var(--text-secondary);">
+        ✓ 覆盖毕业论文常见 30+ 格式雷区（Beta 版，不保证查出全部）
+    </div>
+    <div style="padding:6px 12px;background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.25);border-radius:20px;color:var(--text-secondary);">
+        💸 免费预览 3 条问题 · 付费后报告不对无理由退款
+    </div>
+</div>
+''', unsafe_allow_html=True)
 
 # ---- 定制版：格式规范上传入口（策略B：所有人可见，解析时拦截）----
 with st.expander("📎 上传学校格式规范（定制版专属）", expanded=False):
@@ -847,13 +997,19 @@ if uploaded_file is not None and _can_check:
             os.unlink(tmp_path)
             tmp_path = converted_path
 
+        # 修复版所需的原文件字节会在下面随 check_cache 一起落盘，这里不再暴露临时路径
         html_path = None
         try:
             progress_bar = st.progress(0, text="正在解析论文文档...")
             status_text = st.empty()
             t0 = time.time()
+            # 规则优先级：AI 解析的 custom_rules > 学历档位默认规则 > 硕士默认规则
+            _runtime_rules = st.session_state.get('custom_rules')
+            if not _runtime_rules:
+                _runtime_rules = get_default_rules(st.session_state.get('edu_level', '研究生') and
+                                                   ('本科' if st.session_state.get('edu_level') == '本科' else '硕士'))
             checker = ThesisChecker(tmp_path, thesis_title=thesis_title or None,
-                                   rules=st.session_state.get('custom_rules'))
+                                   rules=_runtime_rules)
             progress_bar.progress(5, text="文档解析完成，开始格式审查...")
 
             def _on_progress(step, total, name):
@@ -884,7 +1040,7 @@ if uploaded_file is not None and _can_check:
 
         report_id = f"FMT-{datetime.now().strftime('%Y%m%d')}-{hashlib.md5(_file_bytes[:1024]).hexdigest()[:6].upper()}"
 
-        # 写入缓存
+        # 写入缓存（带原文件字节供修复版使用，避免临时文件被 finally 清理后丢失）
         st.session_state['check_cache'] = {
             'file_hash': _file_hash,
             'thesis_title': thesis_title or None,
@@ -892,45 +1048,141 @@ if uploaded_file is not None and _can_check:
             'data': data,
             'html_content': html_content,
             'report_id': report_id,
+            'file_bytes': _file_bytes,
         }
 
     st.success(f"审查完成！报告编号 {report_id}")
-    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    # ========== 评分概览 ==========
-    col_ring, col_metrics = st.columns([1, 2])
-    with col_ring:
-        st.markdown(render_score_ring(data['total_score'], data['max_score'], data['grade']),
-            unsafe_allow_html=True)
-        # 排名机制（基于分数估算百分位）
-        pct_score = data['pct']
-        if pct_score >= 90: beat_pct = 85
-        elif pct_score >= 80: beat_pct = 65
-        elif pct_score >= 70: beat_pct = 40
-        elif pct_score >= 60: beat_pct = 20
-        elif pct_score >= 50: beat_pct = 10
-        else: beat_pct = 5
-        st.markdown(f'<p style="text-align:center;font-size:0.85rem;color:#94a3b8;margin-top:4px;">'
-            f'你的论文格式超过了 <b style="color:#818cf8;">{beat_pct}%</b> 的论文</p>',
-            unsafe_allow_html=True)
-        # 风险提示（根据分数动态展示）
-        if data['error_count'] > 0:
-            st.markdown(f'<p style="text-align:center;font-size:0.78rem;color:#f87171;margin-top:2px;">'
-                f'⚠ 检测到 {data["error_count"]} 处严重格式错误，建议提交前逐一修复</p>',
+    # ========== 方案 B：免费藏分 / 付费揭晓 ==========
+    _unlocked_now = st.session_state.get('unlocked', False)
+    _err_cnt = data['error_count']
+    _warn_cnt = data['warning_count']
+
+    # ---- 致命问题 Hero（首屏核心，损失厌恶 framing）----
+    if not _unlocked_now:
+        if _err_cnt > 0:
+            st.markdown(f'''
+            <div style="background:linear-gradient(135deg,rgba(239,68,68,0.15),rgba(239,68,68,0.05));
+                border:1px solid rgba(239,68,68,0.45);border-radius:14px;
+                padding:20px 24px;margin:16px 0 20px;text-align:center;">
+                <div style="font-size:1.1rem;color:#fca5a5;margin-bottom:4px;">⚠ 检测到</div>
+                <div style="font-size:3.2rem;font-weight:900;color:#ef4444;line-height:1;margin:6px 0;">
+                    {_err_cnt}
+                </div>
+                <div style="font-size:1.1rem;font-weight:700;color:#f87171;margin-bottom:8px;">
+                    处致命格式问题
+                </div>
+                <div style="font-size:0.88rem;color:var(--text-secondary);line-height:1.6;">
+                    这些问题可能导致 <b style="color:#fca5a5;">答辩现场被要求返修</b> 或 <b style="color:#fca5a5;">学校抽检被打回</b><br>
+                    延毕半年 ≈ 房租 3000×6 + 机会成本，<b>24.9 元相当于格式保险</b>
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+        else:
+            st.markdown(f'''
+            <div style="background:linear-gradient(135deg,rgba(234,179,8,0.12),rgba(234,179,8,0.04));
+                border:1px solid rgba(234,179,8,0.35);border-radius:14px;
+                padding:20px 24px;margin:16px 0 20px;text-align:center;">
+                <div style="font-size:1rem;color:#fde68a;margin-bottom:4px;">✓ 未检出致命错误</div>
+                <div style="font-size:2rem;font-weight:800;color:#eab308;">
+                    但还有 {_warn_cnt} 处格式警告
+                </div>
+                <div style="font-size:0.85rem;color:var(--text-secondary);margin-top:6px;">
+                    这些问题不一定被打回，但会被导师/评审老师圈红
+                </div>
+            </div>
+            ''', unsafe_allow_html=True)
+        # 分数环打码：只显示问号 + 解锁后可见提示
+        st.markdown('''
+        <div style="display:flex;gap:24px;align-items:center;justify-content:center;flex-wrap:wrap;margin:8px 0 4px;">
+            <div style="width:140px;height:140px;border:8px solid rgba(148,163,184,0.25);
+                border-radius:50%;display:flex;align-items:center;justify-content:center;
+                background:rgba(148,163,184,0.06);">
+                <div style="text-align:center;">
+                    <div style="font-size:2.2rem;font-weight:900;color:#64748b;">?</div>
+                    <div style="font-size:0.68rem;color:#94a3b8;margin-top:-4px;">总分待解锁</div>
+                </div>
+            </div>
+            <div style="font-size:0.85rem;color:var(--text-secondary);line-height:1.9;max-width:320px;">
+                🎯 <b>解锁任意套餐，查看</b>：<br>
+                &nbsp;&nbsp;• 总分 + 评级（A/B/C/D）<br>
+                &nbsp;&nbsp;• 你的论文在同届中的排名百分位<br>
+                &nbsp;&nbsp;• 修复后的预估分数提升<br>
+                &nbsp;&nbsp;• 每处问题的精确位置 + 修改建议
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
+    else:
+        # 付费用户：揭晓分数 + 百分位 + 修复动力
+        col_ring, col_metrics = st.columns([1, 2])
+        with col_ring:
+            st.markdown(render_score_ring(data['total_score'], data['max_score'], data['grade']),
                 unsafe_allow_html=True)
-        if pct_score < 80:
-            st.markdown('<p style="text-align:center;font-size:0.75rem;color:#94a3b8;margin-top:0;">'
-                '格式不达标是盲审退回的常见原因之一</p>',
+            pct_score = data['pct']
+            if pct_score >= 90: beat_pct = 85
+            elif pct_score >= 80: beat_pct = 65
+            elif pct_score >= 70: beat_pct = 40
+            elif pct_score >= 60: beat_pct = 20
+            elif pct_score >= 50: beat_pct = 10
+            else: beat_pct = 5
+            st.markdown(f'<p style="text-align:center;font-size:0.85rem;color:#94a3b8;margin-top:4px;">'
+                f'你的论文格式超过了 <b style="color:#818cf8;">{beat_pct}%</b> 的论文</p>',
                 unsafe_allow_html=True)
-    with col_metrics:
+            # 修复动力：距 A+ 还差多少（未到 A 的显示距 A 的距离）
+            if data['total_score'] < 97 and _err_cnt > 0:
+                target = 'A+' if pct_score >= 90 else ('A' if pct_score >= 80 else '下一档')
+                st.markdown(f'<p style="text-align:center;font-size:0.82rem;color:#fbbf24;margin-top:4px;">'
+                    f'距离 <b>{target}</b> 还差修复 {_err_cnt} 处致命错误</p>',
+                    unsafe_allow_html=True)
+            if _err_cnt > 0:
+                st.markdown(f'<p style="text-align:center;font-size:0.78rem;color:#f87171;margin-top:2px;">'
+                    f'⚠ 建议提交前逐一修复</p>', unsafe_allow_html=True)
+
+            # 修复后预估分（可修复问题按权重估算，给出修复版的升级钩子）
+            _fixable = data.get('fixable_count', 0)
+            if _fixable > 0 and data['total_score'] < data['max_score']:
+                # 粗估：每个可修复的 error 加回 1.5 分，warning 加回 0.7 分，capped
+                fixable_errors = sum(1 for i in issues
+                    if i.get('fixable') and i.get('severity') == 'error')
+                fixable_warnings = sum(1 for i in issues
+                    if i.get('fixable') and i.get('severity') == 'warning')
+                est_gain = min(fixable_errors * 1.5 + fixable_warnings * 0.7,
+                              data['max_score'] - data['total_score'])
+                est_score = round(data['total_score'] + est_gain, 1)
+                est_grade = 'A+' if est_score >= 97 else ('A' if est_score >= 85 else 'B')
+                _current_tier = st.session_state.get('user_tier', 'basic')
+                cta_line = ('✨ 修复版可自动修复这些问题' if _current_tier != 'fix'
+                            else '✓ 你已有修复版，点击下方"一键修复"')
+                st.markdown(f'''
+                <div style="background:linear-gradient(135deg,rgba(34,197,94,0.1),rgba(34,197,94,0.02));
+                    border:1px solid rgba(34,197,94,0.35);border-radius:10px;
+                    padding:12px 14px;margin-top:12px;text-align:center;">
+                    <div style="font-size:0.78rem;color:#86efac;">修复后预估提升</div>
+                    <div style="font-size:1.3rem;font-weight:800;color:#22c55e;margin:4px 0;">
+                        {data["total_score"]} → {est_score} <span style="font-size:0.9rem;color:#86efac;">({est_grade})</span>
+                    </div>
+                    <div style="font-size:0.72rem;color:var(--text-muted);">
+                        {_fixable} 项可自动修复 · {cta_line}
+                    </div>
+                </div>
+                ''', unsafe_allow_html=True)
+        with col_metrics:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("严重错误", data['error_count'])
+            m2.metric("格式警告", data['warning_count'])
+            m3.metric("优化建议", data['info_count'])
+            m4, m5, m6 = st.columns(3)
+            m4.metric("段落数", data['total_paras'])
+            m5.metric("表格数", data['total_tables'])
+            m6.metric("图片数", data['total_images'])
+
+    # 免费用户也显示问题数量指标（但不显示段落/表格/图片的中性指标避免平静感）
+    if not _unlocked_now:
         m1, m2, m3 = st.columns(3)
-        m1.metric("严重错误", data['error_count'])
-        m2.metric("格式警告", data['warning_count'])
-        m3.metric("优化建议", data['info_count'])
-        m4, m5, m6 = st.columns(3)
-        m4.metric("段落数", data['total_paras'])
-        m5.metric("表格数", data['total_tables'])
-        m6.metric("图片数", data['total_images'])
+        m1.metric("严重错误", _err_cnt, delta=None,
+                  help="必须修复，否则答辩/抽检容易被打回")
+        m2.metric("格式警告", _warn_cnt, help="会被导师/评审老师指出返修")
+        m3.metric("优化建议", data['info_count'], help="非强制，但能让论文更规范")
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -983,13 +1235,29 @@ if uploaded_file is not None and _can_check:
     issues = data['issues']
     st.markdown(f"#### 问题详情（共 {len(issues)} 条）")
 
-    # 免费展示：优先挑选编号规范和正文格式的 error/warning（最抓眼球）
+    # 免费预览：冰山一角策略 — 固定优先 2 条严重错误 + 1 条警告，制造 Zeigarnik 效应
+    # （未完成感 > 随机抽样，让用户看到"真问题"的样子后对剩余内容产生强烈好奇）
     FREE_LIMIT = 3
-    priority_modules = ['编号规范', '正文格式', '标题层级', '图表规范']
-    priority_issues = [i for i in issues
-                       if i['module'] in priority_modules and i['severity'] in ('error', 'warning')]
-    other_issues = [i for i in issues if i not in priority_issues]
-    free_preview = (priority_issues + other_issues)[:FREE_LIMIT]
+    errors_only = [i for i in issues if i['severity'] == 'error']
+    warnings_only = [i for i in issues if i['severity'] == 'warning']
+    infos_only = [i for i in issues if i['severity'] == 'info']
+
+    free_preview = []
+    # 先塞 2 条严重错误（按模块优先级：编号>标题>图表>正文）
+    priority_modules = ['编号规范', '标题层级', '图表规范', '正文格式', '参考文献', '封面', '目录']
+    errors_sorted = sorted(errors_only,
+        key=lambda i: (priority_modules.index(i['module']) if i['module'] in priority_modules else 99,
+                       i.get('para_index', 0)))
+    free_preview.extend(errors_sorted[:2])
+    # 再塞 1 条警告
+    if len(free_preview) < FREE_LIMIT and warnings_only:
+        free_preview.append(warnings_only[0])
+    # 如果严重错误不够 2 条，用警告补
+    while len(free_preview) < FREE_LIMIT:
+        candidates = [i for i in warnings_only + infos_only if i not in free_preview]
+        if not candidates:
+            break
+        free_preview.append(candidates[0])
 
     for issue in free_preview:
         st.markdown(render_issue(issue), unsafe_allow_html=True)
@@ -999,24 +1267,35 @@ if uploaded_file is not None and _can_check:
         unlocked = st.session_state.get('unlocked', False)
 
         if not unlocked:
-            # 付费墙遮罩
-            hidden_errors = sum(1 for i in issues[FREE_LIMIT:] if i['severity'] == 'error')
-            hidden_warnings = sum(1 for i in issues[FREE_LIMIT:] if i['severity'] == 'warning')
-            urgency_parts = []
+            # 付费墙遮罩（损失厌恶 framing，锚定答辩成本）
+            # 计算还有多少处未展示的严重错误（总错 - 已展示的）
+            shown_errors = sum(1 for i in free_preview if i['severity'] == 'error')
+            shown_warnings = sum(1 for i in free_preview if i['severity'] == 'warning')
+            hidden_errors = _err_cnt - shown_errors
+            hidden_warnings = _warn_cnt - shown_warnings
+            hidden_total = len(issues) - len(free_preview)
+
+            # 核心恐惧文案：优先提严重错误，没有严重错误时提警告
             if hidden_errors > 0:
-                urgency_parts.append(f'<b style="color:#f87171;">{hidden_errors} 处严重错误</b>')
-            if hidden_warnings > 0:
-                urgency_parts.append(f'<b style="color:#fbbf24;">{hidden_warnings} 处格式警告</b>')
-            urgency_text = '、'.join(urgency_parts) if urgency_parts else f'{len(issues)-FREE_LIMIT} 条问题'
+                fear_line = f'<b style="color:#ef4444;">还有 {hidden_errors} 处致命错误</b>未展示 — 其中任何一处都可能导致答辩返修'
+            elif hidden_warnings > 0:
+                fear_line = f'<b style="color:#fbbf24;">还有 {hidden_warnings} 处格式警告</b>未展示 — 这些会被导师/评审老师圈红要求返工'
+            else:
+                fear_line = f'还有 {hidden_total} 条问题未展示'
+
             st.markdown(f'''
-            <div class="paywall">
-                <div style="font-size:2.5rem;margin-bottom:8px;">🔒</div>
-                <div style="font-size:1.2rem;font-weight:700;color:var(--text-primary);margin-bottom:6px;">
-                    还有 {urgency_text} 未查看</div>
-                <div style="color:var(--text-secondary);font-size:0.9rem;margin-bottom:8px;">
-                    这些问题可能导致盲审退回或答辩前被要求返工</div>
-                <div style="color:var(--text-muted);font-size:0.8rem;margin-bottom:20px;">
-                    解锁完整报告，查看每条问题的精确位置和修改建议</div>
+            <div class="paywall" style="text-align:center;padding:24px 20px;">
+                <div style="font-size:2.2rem;margin-bottom:4px;">🔒</div>
+                <div style="font-size:1.15rem;font-weight:700;color:var(--text-primary);margin-bottom:8px;line-height:1.6;">
+                    {fear_line}
+                </div>
+                <div style="color:var(--text-secondary);font-size:0.92rem;margin-bottom:12px;line-height:1.7;">
+                    答辩被打回 = 返修几周 + 延期答辩 + 重新约导师<br>
+                    <b style="color:#fde047;">24.9 元 ≈ 2 天外卖</b>，但省下的可能是几个月时间
+                </div>
+                <div style="color:var(--text-muted);font-size:0.82rem;margin-bottom:12px;padding:8px 12px;background:rgba(148,163,184,0.08);border-radius:8px;display:inline-block;">
+                    ⏱ 5 分钟付费 → 全部问题定位到页码行号 → 今晚就能改完
+                </div>
             </div>''', unsafe_allow_html=True)
 
             st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -1033,10 +1312,10 @@ if uploaded_file is not None and _can_check:
                         <span class="discount-badge">毕业季半价</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
-                        60+ 项规则全量扫描<br>
+                        <i style="color:#cbd5e1;">要一份能看的清单，自己改</i><br>
+                        14 个模块 + 30+ 格式雷区扫描<br>
                         查看前 5 条问题详情<br>
-                        含问题位置定位<br>
-                        1 次检查机会</div>
+                        含问题位置定位 · 1 次检查</div>
                 </div>''', unsafe_allow_html=True)
                 pick_lite = st.button("选择极简版", key="pick_lite", use_container_width=True)
             with t2:
@@ -1048,11 +1327,10 @@ if uploaded_file is not None and _can_check:
                         <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                        <i style="color:#cbd5e1;">清单 + 每条问题修改示范</i><br>
                         极简版全部功能<br>
-                        <b>查看全部问题详情</b><br>
-                        按严重度/模块智能筛选<br>
-                        下载完整 HTML 报告<br>
-                        含 3 次复查</div>
+                        <b>查看全部问题详情</b> · 筛选<br>
+                        下载完整 HTML 报告 · 3 次复查</div>
                 </div>''', unsafe_allow_html=True)
                 pick_basic = st.button("选择基础版", key="pick_basic", use_container_width=True)
             with t3:
@@ -1064,42 +1342,43 @@ if uploaded_file is not None and _can_check:
                         <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                        <i style="color:#cbd5e1;">定位到页码行号，适合反复改 3 版以上</i><br>
                         基础版全部功能<br>
                         <b>每条问题附修改建议</b><br>
-                        <b>自定义编辑全部检查规则</b><br>
-                        适配任意学校格式要求<br>
+                        <b>自定义编辑全部检查规则</b> · 适配任意学校<br>
                         不限次复查 · 优先客服</div>
                 </div>''', unsafe_allow_html=True)
                 pick_pro = st.button("选择专业版", key="pick_pro", type="primary", use_container_width=True)
 
-            # ---- 定制版卡片 ----
+            # ---- 修复版卡片 ----
             st.markdown('''
             <div style="max-width:360px;margin:16px auto;">
                 <div class="glass-card tier-pro" style="text-align:center;padding:24px 16px;border-color:rgba(234,179,8,0.6);">
-                    <div style="font-size:1rem;font-weight:700;">定制版</div>
+                    <div style="font-size:1rem;font-weight:700;">修复版 <span class="recommend-badge" style="background:linear-gradient(135deg,#f59e0b,#ef4444);">省300元</span></div>
                     <div style="margin:10px 0;">
-                        <span class="original-price">原价 159.9 元</span><br>
-                        <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
+                        <span class="original-price">原价 199.9 元</span><br>
+                        <span class="price" style="font-size:2rem;font-weight:800;">99.9 元</span>
                         <span class="discount-badge">毕业季5折</span>
                     </div>
                     <div style="font-size:0.78rem;color:#94a3b8;line-height:1.9;text-align:left;padding:0 8px;">
+                        <i style="color:#cbd5e1;">直接给你改好的 docx · 省 300-500 元人工</i><br>
                         专业版全部功能<br>
-                        <b>AI 扫描学校规范自动生成规则</b><br>
-                        <b>支持 PDF/图片格式规范</b><br>
-                        生成后可手动微调<br>
-                        不限次复查</div>
+                        <b>一键自动修复格式问题</b><br>
+                        <b>下载修复后的论文文件</b><br>
+                        修复前预览 · 修复后复查</div>
+                    <div style="font-size:0.72rem;color:#f59e0b;margin-top:8px;">人工改格式 300-500 元 · 本工具 99.9 元 · 周末解放</div>
                 </div>
             </div>''', unsafe_allow_html=True)
-            pick_custom = st.button("选择定制版", key="pick_custom", use_container_width=True)
+            pick_fix = st.button("选择修复版", key="pick_fix", use_container_width=True)
 
             st.caption("邀请同学使用你的专属邀请码购买，双方各返 5 元")
 
             # 选定套餐后弹出付款区（用按钮当前帧判断，不持久化到 session_state）
             just_picked = None
-            if pick_lite: just_picked = ("极简版", "9.9")
-            elif pick_basic: just_picked = ("基础版", "24.9")
-            elif pick_pro: just_picked = ("专业版", "49.9")
-            elif pick_custom: just_picked = ("定制版", "79.9")
+            if pick_lite: just_picked = ("极简版", "9.9", "lite")
+            elif pick_basic: just_picked = ("基础版", "24.9", "basic")
+            elif pick_pro: just_picked = ("专业版", "49.9", "pro")
+            elif pick_fix: just_picked = ("修复版", "99.9", "fix")
 
             if just_picked:
                 # 切换套餐时清除之前的兑换码，防止套餐和码不匹配
@@ -1200,7 +1479,7 @@ if uploaded_file is not None and _can_check:
             # ========== 已解锁报告（根据套餐权限分级展示）==========
             tc = _get_tier_config()
             tier_name = st.session_state.get('user_tier', 'basic')
-            tier_labels = {'lite': '极简版', 'basic': '基础版', 'pro': '专业版', 'custom': '定制版'}
+            tier_labels = {'lite': '极简版', 'basic': '基础版', 'pro': '专业版', 'fix': '修复版'}
             st.markdown(f"**已解锁 · {tier_labels.get(tier_name, '基础版')}**")
 
             # ---- 规则面板（根据套餐权限展示）----
@@ -1281,6 +1560,119 @@ if uploaded_file is not None and _can_check:
             else:
                 st.button("🔒 下载报告（基础版及以上）", disabled=True, use_container_width=True)
 
+            st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+            # ---- 一键修复区域 ----
+            if tc.get('auto_fix'):
+                st.markdown("#### 一键修复")
+                from thesis_fixer import ThesisFixer, FIXABLE_MODULES, UNFIXABLE_REASONS
+
+                # 统计可修复项
+                fixable_issues = [i for i in data['issues']
+                    if i['module'] in FIXABLE_MODULES and ('字体' in i['rule'] or '字号' in i['rule']
+                        or '行距' in i['rule'] or '缩进' in i['rule'] or '居中' in i['rule']
+                        or '加粗' in i['rule'] or '页边距' in i['rule'] or '纸张' in i['rule'])]
+                unfixable_issues = [i for i in data['issues'] if i not in fixable_issues]
+
+                col_f1, col_f2 = st.columns(2)
+                col_f1.metric("可自动修复", f"{len(fixable_issues)} 项", help="字体、字号、行距、缩进、对齐等格式问题")
+                col_f2.metric("需手动处理", f"{len(unfixable_issues)} 项", help="页眉页脚、页码、编号、内容类问题")
+
+                if len(fixable_issues) == 0:
+                    st.info("当前论文没有可自动修复的格式问题，太棒了！")
+                else:
+                    with st.expander("查看修复预览", expanded=False):
+                        st.markdown("**将修复的项目：**")
+                        for fi in fixable_issues[:20]:
+                            st.markdown(f"- {fi['module']} | {fi['location']} | {fi['rule']}")
+                        if len(fixable_issues) > 20:
+                            st.caption(f"... 还有 {len(fixable_issues)-20} 项")
+                        st.markdown("**不修复的项目（需手动处理）：**")
+                        skip_modules = set(i['module'] for i in unfixable_issues if i['module'] in UNFIXABLE_REASONS)
+                        for mod in skip_modules:
+                            st.markdown(f"- {mod}: {UNFIXABLE_REASONS[mod]}")
+
+                    if st.button("确认修复并下载", type="primary", use_container_width=True):
+                        with st.spinner("正在修复格式..."):
+                            # 从缓存里的字节重建临时文件（不依赖已被 finally 清理的原 tmp_path）
+                            cache = st.session_state.get('check_cache', {})
+                            orig_bytes = cache.get('file_bytes')
+                            if not orig_bytes:
+                                # 场景：用户付款后关闭浏览器→第二天回来→解锁状态还在但 session_state 丢了
+                                # 不让用户以为付款打水漂，明确指引 + 保持解锁
+                                st.warning(
+                                    "⚠ 会话已过期，请重新上传同一份论文即可继续使用修复功能。"
+                                    "\n\n你的解锁权限已保留，无需再次付款。")
+                            else:
+                                import tempfile, gc
+                                orig_tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.docx')
+                                orig_path = orig_tmp.name
+                                orig_tmp.write(orig_bytes)
+                                orig_tmp.close()
+
+                                fix_checker = None
+                                fixer = None
+                                try:
+                                    # 用缓存中的检查器重建 issues
+                                    _fix_rules = st.session_state.get('custom_rules') or \
+                                        get_default_rules('本科' if st.session_state.get('edu_level') == '本科' else '硕士')
+                                    fix_checker = ThesisChecker(orig_path,
+                                        rules=_fix_rules)
+                                    fix_checker.run_all_checks()
+                                    fixer = ThesisFixer(orig_path, fix_checker.issues, fix_checker.rules)
+                                    fix_log, skip_log = fixer.fix_all()
+                                    # 保存到临时文件
+                                    fixed_path = os.path.join(tempfile.gettempdir(), f"论文_已修复_{report_id}.docx")
+                                    fixer.save(fixed_path)
+
+                                    st.success(f"修复完成！已修复 {len(fix_log)} 项，跳过 {len(skip_log)} 项")
+
+                                    # 修复日志
+                                    with st.expander("查看修复日志"):
+                                        for m, loc, desc in fix_log:
+                                            st.markdown(f"✅ {m} | {loc} | {desc}")
+                                        if skip_log:
+                                            st.markdown("---")
+                                            for m, loc, reason in skip_log[:10]:
+                                                st.markdown(f"⏭ {m} | {loc} | {reason}")
+
+                                    # 下载修复后的文件
+                                    with open(fixed_path, 'rb') as f:
+                                        st.download_button(
+                                            "📥 下载修复后的论文",
+                                            data=f.read(),
+                                            file_name=f"论文_已修复.docx",
+                                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                            type="primary", use_container_width=True)
+
+                                    st.info("建议下载后重新上传进行复查，确认修复效果")
+                                finally:
+                                    # Windows 上 python-docx 不是上下文管理器，必须显式释放
+                                    # 否则 os.unlink 会抛 PermissionError (WinError 32) 导致临时文件泄漏
+                                    try:
+                                        if fixer is not None:
+                                            fixer.doc = None
+                                        if fix_checker is not None:
+                                            fix_checker.doc = None
+                                        del fixer, fix_checker
+                                        gc.collect()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if os.path.exists(orig_path):
+                                            os.unlink(orig_path)
+                                    except Exception:
+                                        pass
+            else:
+                # 非修复版用户 → 引导升级
+                st.markdown('''<div class="glass-card" style="text-align:center;padding:20px;">
+                    <div style="font-size:1.1rem;font-weight:700;margin-bottom:8px;">一键修复格式问题</div>
+                    <div style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:12px;">
+                        升级修复版，自动修复字体、字号、行距、缩进等格式问题<br>
+                        人工改格式 300-500 元，修复版仅 99.9 元</div>
+                    <div style="color:var(--accent-yellow);font-size:0.8rem;">🔒 修复版专属功能</div>
+                </div>''', unsafe_allow_html=True)
+
     # 页脚
     st.markdown(f'''<div class="app-footer">
         论文格式一键体检 &nbsp;|&nbsp; 报告编号 {report_id} &nbsp;|&nbsp;
@@ -1330,10 +1722,10 @@ else:
                 <span class="discount-badge" style="margin-left:6px;">毕业季半价</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
-                60+ 项规则全量扫描<br>
+                <i style="color:#cbd5e1;">要一份能看的清单，自己改</i><br>
+                14 模块 + 30+ 格式雷区扫描<br>
                 查看前 5 条问题详情<br>
-                含问题位置定位<br>
-                1 次检查机会
+                含问题位置定位 · 1 次检查
             </div>
         </div>
         <div class="glass-card tier-basic" style="text-align:center;padding:24px 16px;">
@@ -1344,11 +1736,11 @@ else:
                 <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
+                <i style="color:#cbd5e1;">清单 + 每条问题修改示范</i><br>
                 极简版全部功能<br>
-                <b>查看全部问题详情</b><br>
-                按严重度/模块智能筛选<br>
+                <b>查看全部问题详情</b> · 筛选<br>
                 下载完整 HTML 报告<br>
-                含 3 次复查（初稿+修改稿+终稿）
+                3 次复查（初稿+修改稿+终稿）
             </div>
         </div>
         <div class="glass-card tier-pro" style="text-align:center;padding:24px 16px;">
@@ -1359,29 +1751,30 @@ else:
                 <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
+                <i style="color:#cbd5e1;">定位到页码行号，适合反复改 3 版以上</i><br>
                 基础版全部功能<br>
                 <b>每条问题附修改建议</b><br>
                 <b>自定义编辑全部检查规则</b><br>
-                适配任意学校格式要求<br>
-                不限次复查 · 优先客服
+                适配任意学校 · 不限次复查 · 优先客服
             </div>
         </div>
     </div>
     <div style="max-width:360px;margin:16px auto;">
         <div class="glass-card tier-pro" style="text-align:center;padding:24px 16px;border-color:rgba(234,179,8,0.6);">
-            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">定制版</div>
+            <div style="font-size:1.1rem;font-weight:700;margin-bottom:4px;">修复版 <span class="recommend-badge" style="background:linear-gradient(135deg,#f59e0b,#ef4444);">省300元</span></div>
             <div style="margin:12px 0;">
-                <span class="original-price">原价 159.9 元</span><br>
-                <span class="price" style="font-size:2rem;font-weight:800;">79.9 元</span>
+                <span class="original-price">原价 199.9 元</span><br>
+                <span class="price" style="font-size:2rem;font-weight:800;">99.9 元</span>
                 <span class="discount-badge" style="margin-left:6px;">毕业季5折</span>
             </div>
             <div style="font-size:0.8rem;color:#94a3b8;line-height:2;text-align:left;padding:0 12px;">
+                <i style="color:#cbd5e1;">直接给你改好的 docx · 省 300-500 元人工</i><br>
                 专业版全部功能<br>
-                <b>AI 扫描学校规范自动生成规则</b><br>
-                <b>支持 PDF/图片格式规范</b><br>
-                生成后可手动微调<br>
-                不限次复查
+                <b>一键自动修复格式问题</b><br>
+                <b>下载修复后的论文文件</b><br>
+                修复前预览 · 修复后复查
             </div>
+            <div style="font-size:0.72rem;color:#f59e0b;margin-top:8px;">人工代改 300-500 元 · 本工具 99.9 元 · 周末解放</div>
         </div>
     </div>
     <div style="text-align:center;font-size:0.8rem;color:#64748b;margin-bottom:20px;">
@@ -1389,10 +1782,36 @@ else:
     </div>
     ''', unsafe_allow_html=True)
 
+    # 朋友圈 / 师门群可直接转发的分享语
+    st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+    st.markdown('#### 觉得有用？转给还在熬夜调格式的同学')
+    st.markdown('''
+    <div style="display:flex;flex-direction:column;gap:10px;margin:12px 0 20px;">
+        <div style="padding:12px 16px;background:rgba(99,102,241,0.08);border-left:3px solid #6366f1;border-radius:8px;color:var(--text-secondary);font-size:0.88rem;">
+            "查完才知道，我那篇'改了八遍'的论文，还有 60 多处格式不合规。"
+        </div>
+        <div style="padding:12px 16px;background:rgba(34,197,94,0.08);border-left:3px solid #22c55e;border-radius:8px;color:var(--text-secondary);font-size:0.88rem;">
+            "人工改格式报价 400，这个 99 块直接给我一份改好的 docx，真香。"
+        </div>
+        <div style="padding:12px 16px;background:rgba(234,179,8,0.08);border-left:3px solid #eab308;border-radius:8px;color:var(--text-secondary);font-size:0.88rem;">
+            "不敢说它全能，但答辩老师常盯的那几项，它是真的都查了。"
+        </div>
+        <div style="padding:12px 16px;background:rgba(239,68,68,0.08);border-left:3px solid #ef4444;border-radius:8px;color:var(--text-secondary);font-size:0.88rem;">
+            "导师只会说'格式自己弄一下'，它会告诉你第 23 页第 4 行空了两格。"
+        </div>
+        <div style="padding:12px 16px;background:rgba(59,130,246,0.08);border-left:3px solid #3b82f6;border-radius:8px;color:var(--text-secondary);font-size:0.88rem;">
+            "转给还在熬夜调页眉的学弟学妹 / 师弟师妹，别再手动数空行了。"
+        </div>
+    </div>
+    <div style="text-align:center;font-size:0.78rem;color:var(--text-muted);margin-bottom:16px;">
+        直接复制上面任意一句，粘到朋友圈 / 毕业群 / 师门群
+    </div>
+    ''', unsafe_allow_html=True)
+
     # 底部
     st.markdown('''<div class="app-footer">
-        论文格式一键体检 &nbsp;|&nbsp; 联系微信 l8811925
-        <br>人工改格式 300-500 元，用工具最低 9.9 元，省 95%+
-        <br>检测不准确全额退款
+        论文格式一键体检 &nbsp;|&nbsp; 本科 / 研究生毕业论文通用 &nbsp;|&nbsp; 联系微信 l8811925
+        <br>人工改格式 300-500 元，用工具最低 9.9 元
+        <br>Beta 版 · 覆盖毕业论文常见 30+ 格式雷区 · 报告不对无理由退款
     </div>''', unsafe_allow_html=True)
     _render_admin_panel()
