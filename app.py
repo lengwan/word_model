@@ -14,7 +14,14 @@ import random
 import html as html_mod
 import subprocess
 from datetime import datetime
-from thesis_checker import ThesisChecker, DEFAULT_RULES, merge_rules, get_default_rules
+from thesis_checker import ThesisChecker, DEFAULT_RULES, merge_rules
+try:
+    from thesis_checker import get_default_rules
+except ImportError:
+    # 向后兼容：若线上 thesis_checker.py 是旧版（无学历切换），退化为硕士规则
+    def get_default_rules(degree='硕士'):
+        import copy as _copy
+        return _copy.deepcopy(DEFAULT_RULES)
 
 # ============================================================
 # 页面配置
