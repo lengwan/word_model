@@ -807,25 +807,6 @@ def _render_admin_panel():
 # ---- 主页面 ----
 # ============================================================
 
-# 倒计时 banner（基于答辩典型日期 5/31 估算，用户可忽略）
-_today = datetime.now()
-_defense_dates = {'研究生': datetime(_today.year, 5, 31), '本科': datetime(_today.year, 6, 15)}
-_default_defense = _defense_dates[st.session_state.get('edu_level', '研究生')]
-if _default_defense < _today:
-    _default_defense = _default_defense.replace(year=_today.year + 1)
-_days_to_defense = (_default_defense - _today).days
-if 0 < _days_to_defense <= 90:
-    st.markdown(f'''
-    <div style="background:linear-gradient(90deg,rgba(239,68,68,0.12),rgba(234,179,8,0.12));
-        border:1px solid rgba(239,68,68,0.3);border-radius:10px;
-        padding:10px 18px;margin:12px 0;text-align:center;font-size:0.88rem;
-        color:var(--text-primary);">
-        ⏳ 距离典型毕业答辩日期（{_default_defense.strftime('%m月%d日')}）还剩
-        <b style="color:#ef4444;font-size:1.1rem;">{_days_to_defense}</b> 天
-        &nbsp;·&nbsp; 平均修改需 4-8 小时，现在查比答辩前一晚强
-    </div>
-    ''', unsafe_allow_html=True)
-
 # Hero
 st.markdown('''
 <div class="hero">
@@ -1080,8 +1061,7 @@ if uploaded_file is not None and _can_check:
                     处致命格式问题
                 </div>
                 <div style="font-size:0.88rem;color:var(--text-secondary);line-height:1.6;">
-                    这些问题可能导致 <b style="color:#fca5a5;">答辩现场被要求返修</b> 或 <b style="color:#fca5a5;">学校抽检被打回</b><br>
-                    延毕半年 ≈ 房租 3000×6 + 机会成本，<b>24.9 元相当于格式保险</b>
+                    这些问题可能导致 <b style="color:#fca5a5;">答辩现场被要求返修</b> 或 <b style="color:#fca5a5;">学校抽检被打回</b>
                 </div>
             </div>
             ''', unsafe_allow_html=True)
@@ -1242,29 +1222,57 @@ if uploaded_file is not None and _can_check:
     issues = data['issues']
     st.markdown(f"#### 问题详情（共 {len(issues)} 条）")
 
-    # 免费预览：冰山一角策略 — 固定优先 2 条严重错误 + 1 条警告，制造 Zeigarnik 效应
-    # （未完成感 > 随机抽样，让用户看到"真问题"的样子后对剩余内容产生强烈好奇）
+    # 免费预览：优先展示"最具说服力"的 3 条
+    # 挑选原则：
+    #   1. 具体到段落/页码（让用户感知"定位精确"）
+    #   2. 高准确度模块（图表、编号、正文格式），低泛化模块靠后（结构、页眉等容易误报的）
+    #   3. 去重同模块同规则（避免 3 条都是"缺少 XX 章节"这种）
     FREE_LIMIT = 3
-    errors_only = [i for i in issues if i['severity'] == 'error']
-    warnings_only = [i for i in issues if i['severity'] == 'warning']
-    infos_only = [i for i in issues if i['severity'] == 'info']
+    # 模块优先级（越靠前的越可能出现在免费预览）
+    # 图表、编号、正文格式、标题、参考文献都是"定位具体 + 准确度高"的强势模块
+    # 论文结构、其他规范、页眉页脚等容易产生"误报感"，靠后
+    priority_modules = [
+        '图表规范', '编号规范', '正文格式', '标题层级',
+        '参考文献', '单位符号', '封面', '摘要', '目录',
+        '页码', '页眉页脚', '内容规范', '结构完整', '其他规范',
+    ]
+    def _mod_rank(m):
+        try: return priority_modules.index(m)
+        except ValueError: return 99
 
+    # 严重度权重：error=0, warning=1, info=2
+    _sev_rank = {'error': 0, 'warning': 1, 'info': 2}
+
+    # 选取策略：
+    #   - 按"模块优先级 + 严重度"排序
+    #   - 同一模块同一规则最多 1 条（避免刷屏感）
+    #   - 带 para_index >= 0 的优先（有具体位置）
+    sorted_issues = sorted(
+        issues,
+        key=lambda i: (
+            _mod_rank(i['module']),
+            _sev_rank.get(i['severity'], 9),
+            0 if i.get('para_index', -1) >= 0 else 1,  # 有段落位置的优先
+            i.get('para_index', 0),
+        ),
+    )
+    # 第一轮：每个模块只挑 1 条（展现工具的"检测广度"）
+    seen_modules = set()
     free_preview = []
-    # 先塞 2 条严重错误（按模块优先级：编号>标题>图表>正文）
-    priority_modules = ['编号规范', '标题层级', '图表规范', '正文格式', '参考文献', '封面', '目录']
-    errors_sorted = sorted(errors_only,
-        key=lambda i: (priority_modules.index(i['module']) if i['module'] in priority_modules else 99,
-                       i.get('para_index', 0)))
-    free_preview.extend(errors_sorted[:2])
-    # 再塞 1 条警告
-    if len(free_preview) < FREE_LIMIT and warnings_only:
-        free_preview.append(warnings_only[0])
-    # 如果严重错误不够 2 条，用警告补
-    while len(free_preview) < FREE_LIMIT:
-        candidates = [i for i in warnings_only + infos_only if i not in free_preview]
-        if not candidates:
+    for iss in sorted_issues:
+        if iss['module'] in seen_modules:
+            continue
+        seen_modules.add(iss['module'])
+        free_preview.append(iss)
+        if len(free_preview) >= FREE_LIMIT:
             break
-        free_preview.append(candidates[0])
+    # 兜底：如果模块不足 3 个，再从剩余问题里补（按整体优先级）
+    if len(free_preview) < FREE_LIMIT:
+        for iss in sorted_issues:
+            if iss not in free_preview:
+                free_preview.append(iss)
+            if len(free_preview) >= FREE_LIMIT:
+                break
 
     for issue in free_preview:
         st.markdown(render_issue(issue), unsafe_allow_html=True)
